@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:sundial}",
+            "name": "Debug SundialApp",
+            "target": "SundialApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SundialApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:sundial}",
+            "name": "Release SundialApp",
+            "target": "SundialApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SundialApp"
+        }
+    ]
+}

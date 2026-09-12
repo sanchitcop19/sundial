@@ -1,0 +1,17 @@
+.build/
+.swiftpm/
+dist/
+*.xcodeproj
+.DS_Store
+*.p8
+asc.env
+*.p12
+*.cer
+*.csr
+*.pem
+*.key
+*.provisionprofile
+*.mobileprovision
+.env
+.env.*
+!.env.example

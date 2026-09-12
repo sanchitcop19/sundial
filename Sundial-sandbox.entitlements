@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Mac App Store entitlements. The sandbox is mandatory there, and every
+       exception below is a "temporary exception", which Apple grants only with
+       a written justification and rejects often. Read docs/app-store.md before
+       relying on any of this: several of the app's features cannot survive the
+       sandbox at all, and this file documents the cost rather than hiding it. -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+
+  <!-- Reading the active tab from Safari and the Chromium browsers. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <key>com.apple.security.temporary-exception.apple-events</key>
+  <array>
+    <string>com.apple.Safari</string>
+    <string>com.google.Chrome</string>
+    <string>com.google.Chrome.beta</string>
+    <string>com.brave.Browser</string>
+    <string>com.microsoft.edgemac</string>
+    <string>company.thebrowser.Browser</string>
+    <string>company.thebrowser.dia</string>
+  </array>
+
+  <!-- Choosing the cloud backup folder with an open panel, which is the only
+       sandbox-legal way to reach iCloud Drive, Dropbox, Drive or OneDrive. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+
+  <!-- Firefox-family container detection reads the session store, and the
+       one-time move of a record written under the old name reads the previous
+       Application Support folder. Both sit outside the container. -->
+  <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+  <array>
+    <string>/Library/Application Support/Firefox/</string>
+    <string>/Library/Application Support/Zen/</string>
+    <string>/Library/Application Support/LibreWolf/</string>
+    <string>/Library/Application Support/Waterfox/</string>
+  </array>
+  <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+  <array>
+    <string>/Library/Application Support/Escapement/</string>
+  </array>
+</dict>
+</plist>
