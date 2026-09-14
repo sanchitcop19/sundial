@@ -13,8 +13,8 @@ you choose. No account, no server, no screenshots.
 
 **[Download Sundial for macOS](https://github.com/sanchitcop19/sundial/releases/latest)**
 — requires macOS 14 or later. Open the DMG and drag Sundial into Applications.
-Universal build for Apple silicon and Intel Macs. This first release is
-**not notarized**; see [first-launch instructions](#install) below.
+Universal build for Apple silicon and Intel Macs. **Version 0.1.1 is signed
+with Developer ID and notarized by Apple.**
 
 ---
 
@@ -250,12 +250,9 @@ threshold re-decides history too.
 
 Requires macOS 14 or later on Apple silicon or Intel.
 
-**The first public release is ad-hoc signed and is not notarized.** macOS does
-not verify its developer identity. After you first try to open Sundial, if
-macOS blocks it, open **System Settings → Privacy & Security → Open Anyway**
-for Sundial, then confirm **Open**. Only do this for a download you trust.
-See [Apple's instructions](https://support.apple.com/en-us/102445).
-You may need to grant Accessibility again after installing an update.
+**Version 0.1.1 is signed with Developer ID and notarized by Apple.** If you
+are upgrading from the ad-hoc-signed 0.1.0 preview, you may need to grant
+Accessibility again because the signing identity has changed.
 
 Grant **Accessibility** when asked — it reads the title of the active window.
 Grant **Automation** for your browser the first time it asks, if you use Chrome,
@@ -299,9 +296,17 @@ To package an unnotarized universal build without Apple signing credentials:
 SUNDIAL_VERSION=0.1.0 ./release.sh --preview
 ```
 
-This writes `dist/Sundial-0.1.0.dmg` without updating an installed copy. Preview
-releases must disclose their signing status and include the first-launch
-instructions above. Use `SUNDIAL_VERSION` to set the version of a new release.
+This writes `dist/Sundial-0.1.0.dmg` without updating an installed copy. Use
+`SUNDIAL_VERSION` to set the version of a new release.
+
+**Preview builds are ad-hoc signed and are not notarized.** Their signatures do
+not verify developer identity. If macOS blocks a preview after the first launch
+attempt, open **System Settings → Privacy & Security → Open Anyway** for
+Sundial, then confirm **Open**. Only do this for a download you trust. See
+[Apple's instructions](https://support.apple.com/en-us/102445). Preview releases
+must disclose their signing status and include these first-launch instructions.
+You may need to grant Accessibility again after a preview update or when moving
+from a preview to a Developer ID release.
 
 See [the distribution guide](docs/app-store.md) for credential setup and the
 experimental Mac App Store packaging path. Signing keys, credentials, and
