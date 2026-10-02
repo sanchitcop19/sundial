@@ -14,8 +14,14 @@ public enum Analytics {
     /// silently shifted one.
     public static func splitByHour(start: Date, end: Date,
                                    calendar: Calendar = .current) -> [(hour: Int, seconds: TimeInterval)] {
+        hourPieces(start: start, end: end, calendar: calendar)
+            .map { ($0.hour, $0.end.timeIntervalSince($0.start)) }
+    }
+
+    static func hourPieces(start: Date, end: Date,
+                           calendar: Calendar) -> [(start: Date, end: Date, hour: Int)] {
         guard end > start else { return [] }
-        var out: [(Int, TimeInterval)] = []
+        var out: [(Date, Date, Int)] = []
         var cursor = start
         var guardrail = 0
         while cursor < end, guardrail < 48 {
@@ -25,7 +31,7 @@ public enum Analytics {
                                          matching: DateComponents(minute: 0, second: 0),
                                          matchingPolicy: .nextTime) ?? end
             let stop = min(next, end)
-            out.append((hour, stop.timeIntervalSince(cursor)))
+            out.append((cursor, stop, hour))
             cursor = stop
         }
         return out
@@ -35,9 +41,36 @@ public enum Analytics {
     public static func hourBuckets(_ segments: [Segment], state: TimeCategory,
                                    calendar: Calendar = .current) -> [TimeInterval] {
         var buckets = [TimeInterval](repeating: 0, count: 24)
-        for s in segments where s.state == state {
-            for piece in splitByHour(start: s.start, end: s.end, calendar: calendar) {
-                buckets[piece.hour] += piece.seconds
+        let chosen = segments.filter { $0.state == state && $0.end > $0.start }
+        guard let first = chosen.map(\.start).min(), let last = chosen.map(\.end).max()
+        else { return buckets }
+
+        // Hour edges come from the calendar once for the whole range rather
+        // than once per segment: calendar arithmetic is slow, takes a lock,
+        // and per segment it dominated reading a year of history.
+        let edges = hourPieces(start: first, end: last, calendar: calendar)
+        guard edges.last?.end == last else {
+            // Longer than splitByHour walks; fall back to the plain way.
+            for s in chosen {
+                for piece in splitByHour(start: s.start, end: s.end, calendar: calendar) {
+                    buckets[piece.hour] += piece.seconds
+                }
+            }
+            return buckets
+        }
+
+        for s in chosen {
+            var lo = 0, hi = edges.count - 1
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2
+                if edges[mid].start <= s.start { lo = mid } else { hi = mid - 1 }
+            }
+            var i = lo, at = s.start
+            while at < s.end, i < edges.count {
+                let stop = min(edges[i].end, s.end)
+                buckets[edges[i].hour] += stop.timeIntervalSince(at)
+                at = stop
+                i += 1
             }
         }
         return buckets
@@ -297,17 +330,24 @@ public extension Store {
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
-
-        var stats: [DayStats] = []
-        var segmentsByDay: [[Segment]] = []
-        for day in available.sorted() where day >= firstDay && day <= today {
-            let d = currentDay?.day == day ? currentDay! : load(day: day)
-            guard !d.isEmpty,
+        let days: [(day: String, start: Date, end: Date)] = available.sorted().compactMap { day in
+            guard day >= firstDay, day <= today,
                   let dayStart = formatter.date(from: day),
                   let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)
-            else { continue }
+            else { return nil }
+            return (day, dayStart, dayEnd)
+        }
+
+        // Days are independent, and a year of them is too slow to read and
+        // classify one after another, so they are done in parallel.
+        var results = [(DayStats, [Segment])?](repeating: nil, count: days.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: days.count) { i in
+            let (day, dayStart, dayEnd) = days[i]
+            let d = currentDay?.day == day ? currentDay! : load(day: day)
+            guard !d.isEmpty else { return }
             let bounds = Span(max(interval.start, dayStart), min(now, dayEnd))
-            guard bounds.duration > 0 else { continue }
+            guard bounds.duration > 0 else { return }
 
             // Classify the recorded timeline before clipping: input just before
             // a boundary can still explain whether the user was present after it.
@@ -325,11 +365,16 @@ public extension Store {
             var presence = d.presence
             presence.call = PresenceLog.merge(presence.call, tolerance: 0)
                 .compactMap { $0.intersection(bounds) }
-            guard !segs.isEmpty || !presence.call.isEmpty else { continue }
-            stats.append(DayStats.compute(day: day, segments: segs, presence: presence,
-                                          calendar: calendar))
-            segmentsByDay.append(segs)
+            guard !segs.isEmpty || !presence.call.isEmpty else { return }
+            let result = (DayStats.compute(day: day, segments: segs, presence: presence,
+                                           calendar: calendar), segs)
+            lock.lock()
+            results[i] = result
+            lock.unlock()
         }
+        let done = results.compactMap { $0 }
+        let stats = done.map(\.0)
+        let segmentsByDay = done.map(\.1)
         return RangeStats.compute(days: stats,
                                   contexts: RangeStats.contexts(from: segmentsByDay),
                                   today: today)

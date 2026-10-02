@@ -52,6 +52,8 @@ final class Engine: ObservableObject {
     private var lastProjectScan = Date.distantPast
     private var workspaceCache: [pid_t: (String?, Date)] = [:]
     private var claudeAccountCache: (modified: Date, tag: String?)?
+    /// The last statistics read per period, shown while a fresh read runs.
+    var statsCache: [StatsPeriod: (stats: RangeStats, at: Date)] = [:]
     private var rebuildWork: DispatchWorkItem?
     private var followUpWork: DispatchWorkItem?
     private var activationObserver: NSObjectProtocol?

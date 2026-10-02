@@ -105,14 +105,65 @@ public final class Store: @unchecked Sendable {
         }
         d.dateDecodingStrategy = .custom { decoder in
             let text = try decoder.singleValueContainer().decode(String.self)
-            if let d = Store.dateFormatter.date(from: text) { return d }
-            // Tolerate files written without fractional seconds.
-            let plain = ISO8601DateFormatter()
-            plain.formatOptions = [.withInternetDateTime]
-            if let d = plain.date(from: text) { return d }
+            if let d = Store.parseDate(text) { return d }
             throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(),
                                                    debugDescription: "bad date \(text)")
         }
+    }
+
+    static let plainDateFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// Every recorded boundary is a date, so parsing them dominates reading
+    /// history. The exact shape this store writes, `yyyy-MM-ddTHH:mm:ss.SSSZ`,
+    /// is decoded by hand; anything else goes through the formatters.
+    static func parseDate(_ text: String) -> Date? {
+        if let d = parseWrittenDate(text) { return d }
+        if let d = dateFormatter.date(from: text) { return d }
+        // Tolerate files written without fractional seconds.
+        return plainDateFormatter.date(from: text)
+    }
+
+    static func parseWrittenDate(_ text: String) -> Date? {
+        if let native = text.utf8.withContiguousStorageIfAvailable(parseWrittenDate(bytes:)) {
+            return native
+        }
+        return Array(text.utf8).withUnsafeBufferPointer(parseWrittenDate(bytes:))
+    }
+
+    private static func parseWrittenDate(bytes b: UnsafeBufferPointer<UInt8>) -> Date? {
+        guard b.count == 24, b[4] == 45, b[7] == 45, b[10] == 84, b[13] == 58,
+              b[16] == 58, b[19] == 46, b[23] == 90 else { return nil }
+        func num(_ from: Int, _ count: Int) -> Int? {
+            var v = 0
+            for i in from..<from + count {
+                let c = Int(b[i]) - 48
+                guard c >= 0, c <= 9 else { return nil }
+                v = v * 10 + c
+            }
+            return v
+        }
+        guard let y = num(0, 4), let mo = num(5, 2), let d = num(8, 2),
+              let h = num(11, 2), let mi = num(14, 2), let s = num(17, 2),
+              let ms = num(20, 3),
+              (1...12).contains(mo), h < 24, mi < 60, s < 60
+        else { return nil }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+        let monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]
+        guard (1...monthDays).contains(d) else { return nil }
+        // Days from the civil date (proleptic Gregorian), after H. Hinnant.
+        let yy = mo <= 2 ? y - 1 : y
+        let era = (yy >= 0 ? yy : yy - 399) / 400
+        let yoe = yy - era * 400
+        let doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146097 + doe - 719468
+        let millis = ((days * 24 + h) * 60 + mi) * 60_000 + s * 1000 + ms
+        // Milliseconds first, as the formatter does, so both agree exactly.
+        return Date(timeIntervalSince1970: Double(millis) / 1000)
     }
 
     public init(root: URL = Store.defaultRoot) {
@@ -221,9 +272,9 @@ public final class Store: @unchecked Sendable {
     public func load(day: String) -> DayData {
         var data = DayData(day: day)
         if let text = try? String(contentsOf: observationsURL(day), encoding: .utf8) {
+            let decoder = dec
             data.observations = text.split(separator: "\n").compactMap {
-                guard let d = $0.data(using: .utf8) else { return nil }
-                return try? dec.decode(ObservationSpan.self, from: d)
+                try? decoder.decode(ObservationSpan.self, from: Data($0.utf8))
             }
         }
         if let d = try? Data(contentsOf: presenceURL(day)),

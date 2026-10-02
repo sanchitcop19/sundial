@@ -64,6 +64,40 @@ final class AnalyticsTests: XCTestCase {
                        3600, accuracy: 1)
     }
 
+    /// Buckets are filled from hour edges computed once per range; they must
+    /// match splitting every segment on its own, including across a DST change.
+    func testBucketsMatchPerSegmentSplittingAcrossDaylightSaving() {
+        var la = Calendar(identifier: .gregorian)
+        la.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let dayStart = la.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+        var rng = SystemRandomNumberGenerator()
+        var segs: [Segment] = []
+        var t = dayStart
+        while t < dayStart.addingTimeInterval(25 * 3600) {
+            let end = t.addingTimeInterval(Double.random(in: 1...5400, using: &rng))
+            segs.append(seg(t, end, Bool.random(using: &rng) ? .work : .personal))
+            t = end.addingTimeInterval(Double.random(in: 0...600, using: &rng))
+        }
+        for state in [TimeCategory.work, .personal] {
+            var expected = [TimeInterval](repeating: 0, count: 24)
+            for s in segs where s.state == state {
+                for p in Analytics.splitByHour(start: s.start, end: s.end, calendar: la) {
+                    expected[p.hour] += p.seconds
+                }
+            }
+            let got = Analytics.hourBuckets(segs, state: state, calendar: la)
+            for h in 0..<24 { XCTAssertEqual(got[h], expected[h], accuracy: 1e-6, "hour \(h)") }
+        }
+    }
+
+    func testBucketsForSegmentsSpreadOverDaysStillAddUp() {
+        let segs = [seg(at(9), at(10)), seg(at(9).addingTimeInterval(3 * 86400),
+                                            at(9).addingTimeInterval(3 * 86400 + 1800))]
+        let work = Analytics.hourBuckets(segs, state: .work, calendar: cal)
+        XCTAssertEqual(work[9], 5400, accuracy: 1)
+        XCTAssertEqual(work.reduce(0, +), 5400, accuracy: 1)
+    }
+
     func testBucketsAlwaysCoverTwentyFourHours() {
         XCTAssertEqual(Analytics.hourBuckets([], state: .work, calendar: cal).count, 24)
     }

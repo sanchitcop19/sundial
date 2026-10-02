@@ -6,7 +6,7 @@ import SundialCore
 /// under the current rules, so fixing a rule corrects the charts too.
 struct StatsView: View {
     @EnvironmentObject var engine: Engine
-    @State private var period: StatsPeriod = .week
+    @State private var period: StatsPeriod = .year
     @State private var stats: RangeStats?
     @State private var loading = false
     @State private var requestedAt = Date()
@@ -57,7 +57,11 @@ struct StatsView: View {
                 .buttonStyle(.plain)
             }
             Button { reload() } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
+                if loading && stats != nil {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
+                }
             }
             .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 4)
         }
@@ -323,14 +327,20 @@ struct StatsView: View {
         return Calendar.current.date(bySettingHour: mid / 60, minute: mid % 60, second: 0, of: Date())
     }
 
+    /// The last result for the period shows at once while a fresh one is read.
     private func reload() {
         loading = true
-        stats = nil
+        let cached = engine.statsCache[period]
+        stats = cached?.stats
+        if let cached { requestedAt = cached.at }
         let id = UUID()
         requestID = id
-        requestedAt = Date()
-        engine.loadStats(period: period, now: requestedAt) { result in
+        let now = Date()
+        let requested = period
+        engine.loadStats(period: requested, now: now) { result in
+            engine.statsCache[requested] = (result, now)
             guard requestID == id else { return }
+            requestedAt = now
             stats = result
             loading = false
         }

@@ -25,18 +25,22 @@ public struct Classifier: Sendable {
         guard cuts.count > 1 else { return [] }
 
         var raw: [Segment] = []
+        var judged: [Int: Segment] = [:]
         for i in 0..<(cuts.count - 1) {
             let a = cuts[i], b = cuts[i + 1]
             guard b > a else { continue }
-            raw.append(decide(from: a, to: b, obs: obs, presence: presence))
+            raw.append(decide(from: a, to: b, obs: obs, presence: presence, judged: &judged))
         }
         return coalesce(raw)
     }
 
     // MARK: - Decisions
 
+    /// `judged` remembers the content verdict per observation: an observation
+    /// spans many cuts, and matching it against every rule each time dominated.
     private func decide(from a: Date, to b: Date,
-                        obs: [ObservationSpan], presence: PresenceLog) -> Segment {
+                        obs: [ObservationSpan], presence: PresenceLog,
+                        judged: inout [Int: Segment]) -> Segment {
         // 1. Presence. Nothing on screen counts if nobody is there.
         if covers(presence.offline, a) {
             return Segment(start: a, end: b, state: .away,
@@ -62,9 +66,19 @@ public struct Classifier: Sendable {
         }
 
         // 2. Content. Whatever was on screen, judged by the rules.
-        guard let snap = snapshot(obs, at: a) else {
+        guard let index = observationIndex(obs, at: a) else {
             return Segment(start: a, end: b, state: .away, reason: "Nothing recorded on screen")
         }
+        if var known = judged[index] {
+            known.start = a; known.end = b
+            return known
+        }
+        let verdict = judge(obs[index].snapshot, from: a, to: b)
+        judged[index] = verdict
+        return verdict
+    }
+
+    private func judge(_ snap: Snapshot, from a: Date, to b: Date) -> Segment {
         if let rule = rules.match(snap) {
             return Segment(start: a, end: b, state: rule.outcome.state, snapshot: snap,
                            ruleId: rule.id, ruleName: rule.name,
@@ -139,13 +153,13 @@ public struct Classifier: Sendable {
         return best
     }
 
-    private func snapshot(_ obs: [ObservationSpan], at d: Date) -> Snapshot? {
+    private func observationIndex(_ obs: [ObservationSpan], at d: Date) -> Int? {
         var lo = 0, hi = obs.count - 1
         while lo <= hi {
             let mid = (lo + hi) / 2
             if obs[mid].end <= d { lo = mid + 1 }
             else if obs[mid].start > d { hi = mid - 1 }
-            else { return obs[mid].snapshot }
+            else { return mid }
         }
         return nil
     }
