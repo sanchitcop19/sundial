@@ -51,6 +51,7 @@ final class Engine: ObservableObject {
     private var projectIndex: [String: String] = [:]
     private var lastProjectScan = Date.distantPast
     private var workspaceCache: [pid_t: (String?, Date)] = [:]
+    private var claudeAccountCache: (modified: Date, tag: String?)?
     private var rebuildWork: DispatchWorkItem?
     private var followUpWork: DispatchWorkItem?
     private var activationObserver: NSObjectProtocol?
@@ -268,6 +269,8 @@ final class Engine: ObservableObject {
                     snap.urlPath = comps.path.isEmpty ? "/" : comps.path
                 }
             }
+        } else if bundleId == ClaudeDesktop.bundleId {
+            snap.workspace = claudeAccount()
         } else if let prefix = Catalogue.workspaceProbes[bundleId] {
             snap.workspace = cachedWorkspace(pid: app.processIdentifier, prefix: prefix)
         }
@@ -288,6 +291,17 @@ final class Engine: ObservableObject {
         let v = Signals.labelWithPrefix(pid: pid, prefix: prefix)
         workspaceCache[pid] = (v, Date())
         return v
+    }
+
+    /// Re-read only when the file changes, which is when the account does.
+    private func claudeAccount() -> String? {
+        let url = ClaudeDesktop.configURL()
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        else { return nil }
+        if let c = claudeAccountCache, c.modified == modified { return c.tag }
+        let tag = (try? Data(contentsOf: url)).flatMap(ClaudeDesktop.accountTag(fromConfig:))
+        claudeAccountCache = (modified, tag)
+        return tag
     }
 
     /// Editors put the folder name in the title; matching it against known

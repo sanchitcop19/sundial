@@ -31,9 +31,12 @@
 
   <!-- Firefox-family container detection reads the session store, and the
        one-time move of a record written under the old name reads the previous
-       Application Support folder. Both sit outside the container. -->
+       Application Support folder. Both sit outside the container. The Claude
+       desktop app's signed-in account is one key in its config file; only that
+       file is exposed, not the folder beside it. -->
   <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
   <array>
+    <string>/Library/Application Support/Claude/config.json</string>
     <string>/Library/Application Support/Firefox/</string>
     <string>/Library/Application Support/Zen/</string>
     <string>/Library/Application Support/LibreWolf/</string>
