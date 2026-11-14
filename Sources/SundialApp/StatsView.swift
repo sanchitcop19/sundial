@@ -11,6 +11,7 @@ struct StatsView: View {
     @State private var loading = false
     @State private var requestedAt = Date()
     @State private var requestID = UUID()
+    @State private var editingTimeOff = false
 
     var body: some View {
         ScrollView {
@@ -38,12 +39,17 @@ struct StatsView: View {
         .onAppear(perform: reload)
         .onChange(of: period) { _, _ in reload() }
         .onChange(of: engine.day) { _, _ in reload() }
+        .sheet(isPresented: $editingTimeOff, onDismiss: reload) {
+            TimeOffView { editingTimeOff = false }.environmentObject(engine)
+        }
     }
 
     private var header: some View {
         HStack(spacing: 6) {
             Text("Stats").font(.system(size: 19, weight: .semibold))
             Spacer()
+            Button("Time off…") { editingTimeOff = true }
+                .controlSize(.small).padding(.trailing, 4)
             ForEach(StatsPeriod.allCases, id: \.self) { choice in
                 Button { period = choice } label: {
                     Text(choice.title)
@@ -83,12 +89,13 @@ struct StatsView: View {
                         Text(periodDates + (period == .week ? " · so far" : ""))
                             .font(.system(size: 10)).foregroundStyle(.secondary)
                         if period != .week {
-                            Text(weekly.completedWeeks == 0
-                                 ? "No complete weeks with records yet"
-                                 : "\(weekly.completedWeeks) complete week"
-                                   + (weekly.completedWeeks == 1 ? "" : "s")
-                                   + " · current week excluded")
+                            Text(weeksNote(weekly))
                                 .font(.system(size: 10)).foregroundStyle(.secondary)
+                            if weekly.timeOffDays > 0 {
+                                Text("\(weekly.timeOffDays) day\(weekly.timeOffDays == 1 ? "" : "s") off "
+                                     + "not counted against you")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     Spacer(minLength: 0)
@@ -113,11 +120,8 @@ struct StatsView: View {
     private func tiles(_ s: RangeStats) -> some View {
         Group {
             stat("Average day",
-                     s.completedActiveDays.isEmpty ? "—" : Format.duration(s.averageWorkPerActiveDay),
-                     sub: s.completedActiveDays.isEmpty
-                          ? "no complete day yet"
-                          : "\(s.completedActiveDays.count) complete day"
-                            + "\(s.completedActiveDays.count == 1 ? "" : "s"), today excluded")
+                     s.countedDays.isEmpty ? "—" : Format.duration(s.averageWorkPerActiveDay),
+                     sub: averageDayNote(s))
                 stat("Longest focus", Format.duration(s.longestFocus),
                      sub: "tracked work, pauses excluded")
                 if s.totalCallSeconds > 60 {
@@ -144,11 +148,7 @@ struct StatsView: View {
             Chart(s.days) { d in
                 BarMark(x: .value("Day", d.day),
                         y: .value("Hours", d.totals.work / 3600))
-                    .foregroundStyle(d.day == s.today
-                                     ? Theme.work.opacity(0.3)
-                                     : (d.isWeekend
-                                        ? Theme.work.opacity(0.5)
-                                        : Theme.work))
+                    .foregroundStyle(barColor(d, in: s))
                     .cornerRadius(4)
                 if s.averageWorkPerActiveDay > 0 {
                     RuleMark(y: .value("Average", s.averageWorkPerActiveDay / 3600))
@@ -166,6 +166,7 @@ struct StatsView: View {
             .chartYAxisLabel("hours")
             .frame(height: 150)
             Text("Weekends are paler, and today is paler still because it is not finished. "
+                 + (s.days.contains(where: \.isTimeOff) ? "Days off are blue. " : "")
                  + "The dashed line is the average of complete days.")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
@@ -240,7 +241,9 @@ struct StatsView: View {
 
     private func rhythm(_ s: RangeStats) -> some View {
         Card(title: "Shape of the day") {
-            let active = s.completedActiveDays
+            // Days off are left out: a quick check-in on holiday says nothing
+            // about the shape of a normal day.
+            let active = s.countedDays
             let starts = active.compactMap(\.firstActivity)
             let ends = active.compactMap(\.lastActivity)
             let density = active.isEmpty ? 0 : active.reduce(0) { $0 + $1.density } / Double(active.count)
@@ -253,6 +256,10 @@ struct StatsView: View {
                      sub: "changes of subject")
                 if s.weekendWork > 60 {
                     stat("Weekend", Format.duration(s.weekendWork), tint: Theme.unclassified)
+                }
+                if s.timeOffWork > 60 {
+                    stat("On days off", Format.duration(s.timeOffWork),
+                         sub: "a bonus, never a penalty", tint: Theme.personal)
                 }
             }
         }
@@ -288,6 +295,26 @@ struct StatsView: View {
     }
 
     // MARK: - Helpers
+
+    private func weeksNote(_ weekly: WeeklyWorkStats) -> String {
+        if weekly.completedWeeks == 0 { return "No complete weeks with records yet" }
+        if weekly.averageWork == nil { return "Every complete week was time off" }
+        let plural = weekly.completedWeeks == 1 ? "" : "s"
+        return "\(weekly.completedWeeks) complete week\(plural) · current week excluded"
+    }
+
+    private func averageDayNote(_ s: RangeStats) -> String {
+        let n = s.countedDays.count
+        if n == 0 { return "no complete workday yet" }
+        let daysOff = s.days.contains(where: \.isTimeOff) ? " and days off" : ""
+        return "\(n) complete day\(n == 1 ? "" : "s"), today\(daysOff) excluded"
+    }
+
+    private func barColor(_ d: DayStats, in s: RangeStats) -> Color {
+        if d.day == s.today { return Theme.work.opacity(0.3) }
+        if d.isTimeOff { return Theme.personal }
+        return d.isWeekend ? Theme.work.opacity(0.5) : Theme.work
+    }
 
     /// Thin the day labels so a quarter or year stays readable.
     private func axisDays(_ s: RangeStats) -> [String] {

@@ -557,6 +557,17 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Days marked as paid time off. Read from disk each time: the list is
+    /// small and only changes when the person edits it.
+    func timeOffDays() -> Set<String> { store.loadTimeOff() }
+
+    /// Saves the days off and drops cached statistics, since every average
+    /// depends on them.
+    func setTimeOff(_ days: Set<String>) {
+        store.save(timeOff: days)
+        statsCache.removeAll()
+    }
+
     // MARK: - Export
 
     func writeDaily() {

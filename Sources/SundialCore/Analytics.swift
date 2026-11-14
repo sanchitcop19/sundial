@@ -113,6 +113,10 @@ public struct DayStats: Sendable, Equatable, Identifiable {
     /// process default here would let a timezone offset move a Saturday.
     public var isWeekend: Bool
 
+    /// Marked as paid time off. Work on it still counts; the day itself is
+    /// never treated as one you were meant to work.
+    public var isTimeOff: Bool
+
     public static func compute(day: String, segments: [Segment], presence: PresenceLog,
                                calendar: Calendar = .current,
                                focusTolerance: TimeInterval = 120) -> DayStats {
@@ -185,13 +189,13 @@ public struct DayStats: Sendable, Equatable, Identifiable {
     public init(day: String, date: Date, totals: Totals, workByHour: [TimeInterval],
                 personalByHour: [TimeInterval], firstActivity: Date?, lastActivity: Date?,
                 longestFocus: TimeInterval, focusBlocks: Int, contextSwitches: Int,
-                callSeconds: TimeInterval, isWeekend: Bool = false) {
+                callSeconds: TimeInterval, isWeekend: Bool = false, isTimeOff: Bool = false) {
         self.day = day; self.date = date; self.totals = totals
         self.workByHour = workByHour; self.personalByHour = personalByHour
         self.firstActivity = firstActivity; self.lastActivity = lastActivity
         self.longestFocus = longestFocus; self.focusBlocks = focusBlocks
         self.contextSwitches = contextSwitches; self.callSeconds = callSeconds
-        self.isWeekend = isWeekend
+        self.isWeekend = isWeekend; self.isTimeOff = isTimeOff
     }
 }
 
@@ -203,9 +207,13 @@ public struct RangeStats: Sendable, Equatable {
     /// The day still in progress. Excluded from anything describing a typical
     /// day, since a partial day would drag every average down.
     public var today: String?
+    /// Every day marked as time off, recorded or not. A day off with nothing
+    /// on it has no entry in `days`, yet still shortens the week it falls in.
+    public var timeOff: Set<String>
 
     public static func == (a: RangeStats, b: RangeStats) -> Bool {
         a.days == b.days && a.contexts.map(\.key) == b.contexts.map(\.key)
+            && a.timeOff == b.timeOff
     }
 
     public var totalWork: TimeInterval { days.reduce(0) { $0 + $1.totals.work } }
@@ -219,13 +227,27 @@ public struct RangeStats: Sendable, Equatable {
     /// Active days that have actually finished.
     public var completedActiveDays: [DayStats] { activeDays.filter { $0.day != today } }
 
+    /// Finished days you were meant to work: the days an average divides by.
+    /// Days off are left out, so a quick check-in on holiday is not counted as
+    /// a short workday.
+    public var countedDays: [DayStats] { completedActiveDays.filter { !$0.isTimeOff } }
+
+    /// Work done on days off, today included.
+    public var timeOffWork: TimeInterval {
+        days.filter(\.isTimeOff).reduce(0) { $0 + $1.totals.work }
+    }
+
     /// Averages describe a finished day, so today is left out. Zero means there
     /// is not a complete day in the range yet, which the UI says rather than
     /// printing a misleading number.
+    ///
+    /// Work on finished days off is added in as a bonus while those days stay
+    /// out of the count: working on one lifts the average, and taking one
+    /// without working leaves it where it was.
     public var averageWorkPerActiveDay: TimeInterval {
-        let d = completedActiveDays
-        guard !d.isEmpty else { return 0 }
-        return d.reduce(0) { $0 + $1.totals.work } / Double(d.count)
+        let counted = countedDays
+        guard !counted.isEmpty else { return 0 }
+        return completedActiveDays.reduce(0) { $0 + $1.totals.work } / Double(counted.count)
     }
 
     /// Work per hour of the day, summed across the range.
@@ -284,8 +306,9 @@ public struct RangeStats: Sendable, Equatable {
 
     public static func compute(days: [DayStats],
                                contexts: [(key: String, detail: String, seconds: TimeInterval)],
-                               today: String? = nil) -> RangeStats {
-        RangeStats(days: days.sorted { $0.day < $1.day }, contexts: contexts, today: today)
+                               today: String? = nil, timeOff: Set<String> = []) -> RangeStats {
+        RangeStats(days: days.sorted { $0.day < $1.day }, contexts: contexts, today: today,
+                   timeOff: timeOff)
     }
 
     /// Rolls up where work time went across many days.
@@ -305,10 +328,18 @@ public struct RangeStats: Sendable, Equatable {
             .prefix(limit).map { $0 }
     }
 
+    /// A day is time off if it says so or `timeOff` lists it, so the set is
+    /// the one place that has to be right.
     public init(days: [DayStats],
                 contexts: [(key: String, detail: String, seconds: TimeInterval)],
-                today: String? = nil) {
-        self.days = days; self.contexts = contexts; self.today = today
+                today: String? = nil, timeOff: Set<String> = []) {
+        self.days = days.map { d in
+            var d = d
+            d.isTimeOff = d.isTimeOff || timeOff.contains(d.day)
+            return d
+        }
+        self.contexts = contexts; self.today = today
+        self.timeOff = timeOff.union(days.filter(\.isTimeOff).map(\.day))
     }
 }
 
@@ -377,6 +408,6 @@ public extension Store {
         let segmentsByDay = done.map(\.1)
         return RangeStats.compute(days: stats,
                                   contexts: RangeStats.contexts(from: segmentsByDay),
-                                  today: today)
+                                  today: today, timeOff: loadTimeOff())
     }
 }

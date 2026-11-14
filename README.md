@@ -333,6 +333,28 @@ excluded. Weeks with no records are excluded; recorded weeks with no work count
 as zero. With no completed recorded weeks, the average shows a dash. The period's
 total work through today remains alongside it.
 
+### Time off
+
+Mark paid time off with **Time off…** in the Stats tab. Pick a range and every
+weekday in it is marked; weekends are skipped since they are never workdays.
+
+Time off is a bonus, never a penalty:
+
+- **A day off never counts against you.** It is left out of the daily average,
+  and a week with days off counts as only part of a week. Three days off make a
+  week count as two fifths of one.
+- **Work on a day off still counts.** It is added to every total and to the
+  averages, so it can only lift them.
+
+For example, take a week with Friday off: 32 hours Monday to Thursday is a
+40-hour pace (32 ÷ 0.8). Answer email for 2 hours on Friday and it becomes
+42.5 hours (34 ÷ 0.8). The daily average works the same way: two 8-hour days
+plus 2 hours on a day off averages 9 hours, not 6.
+
+Days off show in blue on **Work per day**, are left out of **Shape of the day**,
+and the work done on them is shown as **On days off**. They are kept in
+`time-off.json` beside the record, never mixed into it.
+
 - **Work per day**, with weekends paler and the day in progress paler still.
 - **When you work** — every hour of the day, summed across the period, with the
   core window worked out as the shortest run of hours holding 80% of the work.
