@@ -343,21 +343,28 @@ if args.count > 1, args[1] == "--stats" {
         let weekly = s.weeklyWorkStats(period: period, now: now, calendar: calendar)
         if let average = weekly.averageWork {
             print("  Average week      \(Format.duration(average))"
-                  + "  over \(weekly.completedWeeks) complete calendar week(s), current week excluded")
+                  + "  over \(weekly.completedWeeks) complete calendar week(s), current week excluded"
+                  + (weekly.timeOffDays > 0 ? ", \(weekly.timeOffDays) day(s) off not counted" : ""))
+        } else if weekly.completedWeeks > 0 {
+            print("  Average week      —  (every complete week was time off)")
         } else {
             print("  Average week      —  (no complete weeks with records yet)")
         }
     }
     print("  Total work        \(Format.duration(s.totalWork))")
-    if s.completedActiveDays.isEmpty {
-        print("  Average day       —  (no complete day in this period yet)")
+    if s.countedDays.isEmpty {
+        print("  Average day       —  (no complete workday in this period yet)")
     } else {
         print("  Average day       \(Format.duration(s.averageWorkPerActiveDay))"
-              + "  over \(s.completedActiveDays.count) complete day(s), today excluded")
+              + "  over \(s.countedDays.count) complete day(s), today"
+              + (s.days.contains(where: \.isTimeOff) ? " and days off" : "") + " excluded")
     }
     print("  Longest focus     \(Format.duration(s.longestFocus))")
     if s.totalCallSeconds > 60 { print("  In calls          \(Format.duration(s.totalCallSeconds))") }
     if s.weekendWork > 60 { print("  Weekend work      \(Format.duration(s.weekendWork))") }
+    if s.timeOffWork > 60 {
+        print("  On days off       \(Format.duration(s.timeOffWork))  (a bonus, never a penalty)")
+    }
     if s.totalUnclassified > 60 {
         print("  Unclassified      \(Format.duration(s.totalUnclassified))")
     }
