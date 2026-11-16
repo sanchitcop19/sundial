@@ -3,7 +3,7 @@ import SwiftUI
 import Combine
 import SundialCore
 
-/// The always-visible indicator: current state and today's work total.
+/// Always keeps a Mac control available, even when Live Activity mirroring disappears.
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -15,6 +15,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Drives the beat and the idle fade between samples, so the icon reacts to
     /// a keystroke immediately rather than at the next five-second tick.
     private var display: Timer?
+    private var activityExpiry: Timer?
+    private var breakMenuTimer: Timer?
+    private var breakMenuItem: NSMenuItem?
+    private var startMenuItem: NSMenuItem?
+    private var snoozeMenuItem: NSMenuItem?
+    private var skipMenuItem: NSMenuItem?
+    private var compactForLiveActivity = false
     private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     private var motionObserver: NSObjectProtocol?
     /// Monotonic, so the breath does not stutter when the wall clock is adjusted.
@@ -49,6 +56,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &bag)
+        engine.phoneSync.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshVisibility() }
+            .store(in: &bag)
         motionObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil, queue: .main) { [weak self] _ in
@@ -58,6 +69,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                     self.refresh()
                 }
             }
+        refreshVisibility()
+    }
+
+    private func refreshVisibility() {
+        activityExpiry?.invalidate()
+        activityExpiry = nil
+        var compact = false
+        if #available(macOS 26, *), engine.phoneSync.enabled,
+           engine.phoneSync.preferLiveActivity,
+           let expiry = engine.phoneSync.activeLiveActivityUntil, expiry > Date() {
+            compact = true
+            // Restore the full hours display at expiry even when tracking is paused.
+            let timer = Timer(fire: expiry, interval: 0, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.refreshVisibility() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            activityExpiry = timer
+        }
+        if compactForLiveActivity != compact {
+            drawn = nil
+            tipped = nil
+            compactForLiveActivity = compact
+        }
+        // A phone registration cannot tell us whether macOS is actually mirroring it.
+        item.isVisible = true
         refresh()
     }
 
@@ -68,6 +104,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .away:         return .tertiaryLabelColor
         case .unclassified: return .systemOrange
         }
+    }
+
+    private var isOverTarget: Bool {
+        engine.workTarget.dailyTarget > 0 && engine.totals.work > engine.workTarget.dailyTarget
+    }
+
+    private var targetBalance: String {
+        if engine.workTarget.dailyTarget <= 0 { return "No target today" }
+        if isOverTarget {
+            let overtime = Format.hoursMinutes(engine.totals.work - engine.workTarget.dailyTarget)
+            return "+\(overtime) over target"
+        }
+        return "\(Format.hoursMinutes(engine.workTarget.remainingToday, roundingUp: true)) remaining"
     }
 
     /// The live picture: what the current stretch counts as, and whether it is
@@ -83,14 +132,61 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refresh() {
         let ind = indicator()
         let state = engine.isPaused ? TimeCategory.away : engine.currentState
+        guard let button = item.button else { return }
+        let tip = "Today: \(Format.hoursMinutes(engine.totals.work)) worked · \(targetBalance) (hours:minutes)"
+            + "\n\(engine.workTargetLabel)"
+            + (engine.workTargetWeekSummary.map { "\n" + $0 } ?? "")
+            + (engine.workTargetNote.map { "\n" + $0 } ?? "")
+            + "\n\(engine.isPaused ? "Paused" : state.label) — \(engine.currentReason)"
+            + (ind.note.map { "\n" + $0 } ?? "")
+        if tip != tipped {
+            tipped = tip
+            button.toolTip = tip
+            button.setAccessibilityLabel("Sundial. " + tip)
+        }
+        if compactForLiveActivity {
+            display?.invalidate()
+            display = nil
+            pulse(0, colour: .clear)
+            let fraction = engine.workTarget.dailyTarget > 0
+                ? min(1, max(0, engine.totals.work / engine.workTarget.dailyTarget)) : 0
+            let key = "compact|\(Int(fraction * 100))|\(isOverTarget)"
+            if drawn != key {
+                drawn = key
+                button.attributedTitle = NSAttributedString(string: "")
+                button.image = progressImage(fraction: fraction)
+                button.imagePosition = .imageOnly
+                button.contentTintColor = isOverTarget ? NSColor(Theme.overtime) : nil
+            }
+            return
+        }
+        button.image = nil
+        button.imagePosition = .noImage
+        button.contentTintColor = nil
         let glyph = engine.isPaused ? "⏸" : state.glyph
-        // A break that is owed shows even while the reminder is snoozed, and
-        // needs no notification permission to be seen.
-        let total = Format.duration(engine.totals.work)
-            + (engine.breakStatus.owed ? " \u{2615}" : "")
+        let worked = Format.hoursMinutes(engine.totals.work)
+        let remaining = Format.hoursMinutes(engine.workTarget.remainingToday, roundingUp: true)
+        let overtime = Format.hoursMinutes(engine.totals.work - engine.workTarget.dailyTarget)
+        let time: String
+        let balance: String
+        switch engine.settings.menuBarTimeDisplay {
+        case .worked:
+            time = worked
+            balance = ""
+        case .remaining:
+            time = engine.workTarget.dailyTarget <= 0 ? "No target"
+                : isOverTarget ? "+\(overtime) over" : "\(remaining) left"
+            balance = ""
+        case .both:
+            time = worked
+            balance = isOverTarget ? " · +\(overtime)"
+                : engine.workTarget.dailyTarget > 0 ? " · \(remaining) left" : ""
+        }
+        let indicatorColor = isOverTarget ? NSColor(Theme.overtime) : nsColor(state)
+        // A break that is owed stays visible even while its reminder is snoozed.
+        let suffix = balance + (engine.breakStatus.owed ? " \u{2615}" : "")
         let beating = ind.pulses && !reduceMotion
         schedule(ind, beating: beating)
-        guard let button = item.button else { return }
         if let w = button.window, !w.occlusionState.contains(.visible) { return }
 
         // The dot only leaves the title once the layer has somewhere to be, and
@@ -101,7 +197,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // The expensive half: the words. Setting the title repaints a strip of
         // blurred menu bar, so it happens when the words change and not when
         // the dot does - about once a minute while work is being counted.
-        let key = "\(glyph)|\(state.rawValue)|\(total)|\(Int(ind.alpha * 50))|\(useLayer)"
+        let key = "\(glyph)|\(state.rawValue)|\(time)|\(suffix)|\(Int(ind.alpha * 50))|\(useLayer)"
         if key != drawn {
             drawn = key
             let s = NSMutableAttributedString()
@@ -109,21 +205,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 ? NSAttributedString(string: "  ", attributes: [
                     .font: NSFont.systemFont(ofSize: 11), .kern: dotKern])
                 : NSAttributedString(string: glyph + " ", attributes: [
-                    .foregroundColor: nsColor(state).withAlphaComponent(ind.alpha),
+                    .foregroundColor: indicatorColor.withAlphaComponent(isOverTarget ? 1 : ind.alpha),
                     .font: NSFont.systemFont(ofSize: 11)]))
-            s.append(NSAttributedString(string: total, attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                .foregroundColor: NSColor.labelColor]))
+            // Let the status button choose text contrast for its menu bar
+            // background and highlighted state; label colors bypass that.
+            s.append(NSAttributedString(string: time, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)]))
+            s.append(NSAttributedString(string: suffix, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]))
             button.attributedTitle = s
             titleWidth = s.size().width
-            // Set apart from the redraw: assigning a tooltip rebuilds the
-            // view's tracking areas, and the words change with the state, not
-            // several times a second as the dot fades.
-            let tip = "\(state.label) — \(engine.currentReason)"
-                + (ind.note.map { "\n" + $0 } ?? "")
-            if tip != tipped { tipped = tip; button.toolTip = tip }
         }
-
         // Placement is re-checked on every pass, not only after a redraw: the
         // button's width is not final the instant a new title is set, and a
         // single missed placement used to leave the dot hidden until the
@@ -131,7 +223,29 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if beating { place(dot, in: button) }
         // The cheap half: an opacity, twenty-four times a second, no redraw.
         pulse(useLayer ? Indicator.pulseAlpha(at: clock, period: engine.settings.beatPeriod) : 0,
-              colour: nsColor(state))
+              colour: indicatorColor)
+    }
+
+    private func progressImage(fraction: Double) -> NSImage {
+        let image = NSImage(size: NSSize(width: 17, height: 17), flipped: false) { _ in
+            let bounds = NSRect(x: 2, y: 2, width: 13, height: 13)
+            NSColor.black.withAlphaComponent(0.3).setStroke()
+            let track = NSBezierPath(ovalIn: bounds)
+            track.lineWidth = 2
+            track.stroke()
+            if fraction > 0 {
+                NSColor.black.setStroke()
+                let progress = NSBezierPath()
+                progress.lineWidth = 2
+                progress.lineCapStyle = .round
+                progress.appendArc(withCenter: NSPoint(x: 8.5, y: 8.5), radius: 6.5,
+                                   startAngle: 90, endAngle: 90 - 360 * fraction, clockwise: true)
+                progress.stroke()
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     /// Shows the dot at an opacity, or hides it. Implicit animation is switched
@@ -142,7 +256,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func pulse(_ opacity: Double, colour: NSColor) {
         let hide = opacity <= 0
         let value = Float(opacity)
-        guard hide != !dot.isHidden || value != dot.opacity else { return }
+        guard hide != !dot.isHidden || value != dot.opacity
+            || (!hide && dot.backgroundColor != colour.cgColor) else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         dot.isHidden = hide
@@ -194,7 +309,33 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         display = t
     }
 
-    func menuWillOpen(_ menu: NSMenu) { rebuild() }
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuild()
+        breakMenuTimer?.invalidate()
+        guard breakMenuItem != nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshBreakMenu() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        breakMenuTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        breakMenuTimer?.invalidate()
+        breakMenuTimer = nil
+    }
+
+    private func refreshBreakMenu() {
+        if let text = engine.breakCountdownText, let item = breakMenuItem {
+            item.attributedTitle = label(text, color: .systemTeal, size: 11,
+                                         weight: .semibold).attributedTitle
+        }
+        let canStart = engine.breakStatus.breakRemaining == nil && !engine.isPaused
+        startMenuItem?.isHidden = !canStart
+        let canDefer = engine.breakStatus.owed && canStart
+        snoozeMenuItem?.isHidden = !canDefer
+        skipMenuItem?.isHidden = !canDefer
+    }
 
     private func label(_ text: String, color: NSColor = .labelColor,
                        size: CGFloat = 12, weight: NSFont.Weight = .regular) -> NSMenuItem {
@@ -213,6 +354,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func rebuild() {
         menu.removeAllItems()
+        breakMenuItem = nil
+        startMenuItem = nil
+        snoozeMenuItem = nil
+        skipMenuItem = nil
         let state = engine.isPaused ? TimeCategory.away : engine.currentState
         menu.addItem(label("\(state.glyph)  \(engine.isPaused ? "Paused" : state.label)",
                            color: nsColor(state), size: 13, weight: .semibold))
@@ -226,19 +371,34 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             let v = engine.totals.byState[c] ?? 0
             guard v > 0 || c == .work else { continue }
             menu.addItem(label("     \(c.label.padding(toLength: 14, withPad: " ", startingAt: 0))"
-                               + Format.duration(v), color: nsColor(c), size: 12))
+                               + Format.duration(v),
+                               color: c == .work && isOverTarget ? NSColor(Theme.overtime) : nsColor(c), size: 12))
+        }
+        menu.addItem(label("     \(targetBalance)"
+                           + " · \(engine.workTargetLabel)",
+                           color: isOverTarget ? NSColor(Theme.overtime) : .secondaryLabelColor, size: 11))
+        if let week = engine.workTargetWeekSummary {
+            menu.addItem(label("     " + week, color: .secondaryLabelColor, size: 11))
+        }
+        if let note = engine.workTargetNote {
+            menu.addItem(label("     " + note, color: .secondaryLabelColor, size: 10))
         }
 
-        if engine.breakStatus.owed {
+        if let countdown = engine.breakCountdownText {
             menu.addItem(.separator())
-            menu.addItem(label("Break due after "
-                               + Format.duration(engine.breakStatus.workedStraight)
-                               + " of work"
-                               + (engine.breakStatus.heldBack.map { " (\($0))" } ?? ""),
-                               color: .systemTeal, size: 11, weight: .semibold))
-            menu.addItem(action("Snooze for \(Int(Breaks.snooze / 60)) minutes",
-                                #selector(snoozeBreak)))
-            menu.addItem(action("Skip break", #selector(skipBreak)))
+            let countdownItem = label(countdown, color: .systemTeal, size: 11, weight: .semibold)
+            let start = action("Start break", #selector(startBreak))
+            let snooze = action("Snooze for \(Int(Breaks.snooze / 60)) minutes", #selector(snoozeBreak))
+            let skip = action("Skip break", #selector(skipBreak))
+            breakMenuItem = countdownItem
+            startMenuItem = start
+            snoozeMenuItem = snooze
+            skipMenuItem = skip
+            menu.addItem(countdownItem)
+            menu.addItem(start)
+            menu.addItem(snooze)
+            menu.addItem(skip)
+            refreshBreakMenu()
         }
 
         if !engine.reviewItems.isEmpty {
@@ -254,12 +414,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(action("Open Sundial…", #selector(open), key: "o"))
+        if engine.phoneSync.enabled && engine.phoneSync.hasPushKey {
+            let restore = action(engine.phoneSync.isRestartingLiveActivity
+                ? "Restoring Live Activity…" : "Restore Live Activity", #selector(restoreLiveActivity))
+            restore.isEnabled = !engine.phoneSync.isRestartingLiveActivity
+            menu.addItem(restore)
+        }
         menu.addItem(action(engine.isPaused ? "Resume Tracking" : "Pause Tracking", #selector(pause)))
+        let away = action("Out of Office Today", #selector(toggleOutOfOffice))
+        away.state = engine.isOutOfOfficeToday ? .on : .off
+        menu.addItem(away)
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit), key: "q"))
     }
 
     @objc func pause() { engine.togglePause(); refresh() }
+
+    @objc private func toggleOutOfOffice() { engine.toggleOutOfOfficeToday(); refresh() }
+
+    @objc private func restoreLiveActivity() { engine.phoneSync.restartLiveActivity() }
+
+    @objc func startBreak() { engine.startBreak(); refresh() }
 
     @objc func snoozeBreak() { engine.snoozeBreak(); refresh() }
 
@@ -286,6 +461,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc func quit() {
         display?.invalidate()
+        activityExpiry?.invalidate()
+        breakMenuTimer?.invalidate()
         if let o = motionObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         engine.shutdown()
         NSApp.terminate(nil)

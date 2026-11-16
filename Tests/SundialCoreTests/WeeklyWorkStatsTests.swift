@@ -27,9 +27,15 @@ final class WeeklyWorkStatsTests: XCTestCase {
     }
 
     private func stats(_ days: [DayStats], period: StatsPeriod = .month,
-                       now: Date, calendar: Calendar) -> WeeklyWorkStats {
-        RangeStats(days: days, contexts: [])
-            .weeklyWorkStats(period: period, now: now, calendar: calendar)
+                       now: Date, outOfOffice: OutOfOffice = OutOfOffice(),
+                       includeWeekends: Bool = false, calendar: Calendar) -> WeeklyWorkStats {
+        RangeStats(days: days, contexts: [], outOfOffice: outOfOffice)
+            .weeklyWorkStats(period: period, now: now, includeWeekends: includeWeekends,
+                             calendar: calendar)
+    }
+
+    private func away(_ days: String..., calendar: Calendar) -> OutOfOffice {
+        OutOfOffice(days: Set(days))
     }
 
     func testMonthAverageUsesWholeCompletedWeeksAndIncludesWeekendWork() throws {
@@ -190,5 +196,153 @@ final class WeeklyWorkStatsTests: XCTestCase {
                            now: date(2026, 9, 13, 23, calendar: cal), calendar: cal)
         XCTAssertEqual(result.completedWeeks, 0)
         XCTAssertNil(result.averageWork)
+    }
+
+    // MARK: out of office
+
+    func testUnrecordedDaysOutOfOfficeShrinkTheWeekRatherThanTheAverage() throws {
+        let cal = calendar()
+        let result = stats([
+            day(2026, 9, 11, hours: 8, calendar: cal),  // The only day worked that week.
+            day(2026, 9, 14, hours: 40, calendar: cal),
+        ], now: date(2026, 9, 23, 12, calendar: cal),
+        outOfOffice: away("2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", calendar: cal),
+        calendar: cal)
+
+        XCTAssertEqual(result.completedWeeks, 2)
+        XCTAssertEqual(result.effectiveWeeks, 1.2, accuracy: 1e-9)
+        XCTAssertEqual(result.outOfOfficeDays, 4)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 40 * 3600, accuracy: 0.001,
+                       "a four-day holiday should not make the week look short")
+    }
+
+    func testWorkDoneOnADayOutOfOfficeDoesNotInflateTheAverage() throws {
+        let cal = calendar()
+        let result = stats([
+            day(2026, 9, 7, hours: 8, calendar: cal),
+            day(2026, 9, 8, hours: 8, calendar: cal),
+            day(2026, 9, 9, hours: 8, calendar: cal),
+            day(2026, 9, 10, hours: 8, calendar: cal),
+            day(2026, 9, 11, hours: 3, calendar: cal),   // Some email on the day off.
+        ], now: date(2026, 9, 16, 12, calendar: cal),
+        outOfOffice: away("2026-09-11", calendar: cal), calendar: cal)
+
+        XCTAssertEqual(result.totalWork, 32 * 3600)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 40 * 3600, accuracy: 0.001)
+    }
+
+    func testAWeekEntirelyOutOfOfficeIsLeftOut() throws {
+        let cal = calendar()
+        let result = stats([
+            day(2026, 9, 9, hours: 5, calendar: cal),
+            day(2026, 9, 14, hours: 40, calendar: cal),
+        ], now: date(2026, 9, 23, 12, calendar: cal),
+        outOfOffice: away("2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10",
+                          "2026-09-11", calendar: cal), calendar: cal)
+
+        XCTAssertEqual(result.completedWeeks, 1)
+        XCTAssertEqual(result.outOfOfficeDays, 0)
+        XCTAssertEqual(result.weeksEntirelyOff, 1)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 40 * 3600)
+
+        let onlyThatWeek = stats([day(2026, 9, 9, hours: 5, calendar: cal)],
+                                 now: date(2026, 9, 23, 12, calendar: cal),
+                                 outOfOffice: away("2026-09-07", "2026-09-08", "2026-09-09",
+                                                   "2026-09-10", "2026-09-11", calendar: cal),
+                                 calendar: cal)
+        XCTAssertEqual(onlyThatWeek.completedWeeks, 0)
+        XCTAssertEqual(onlyThatWeek.weeksEntirelyOff, 1)
+        XCTAssertNil(onlyThatWeek.averageWork)
+    }
+
+    func testAWeekendOutOfOfficeDoesNotShortenAMondayToFridayWeek() throws {
+        let cal = calendar()
+        let days = [day(2026, 9, 7, hours: 20, calendar: cal),
+                    day(2026, 9, 12, hours: 20, calendar: cal)]
+        let now = date(2026, 9, 16, 12, calendar: cal)
+        let saturday = away("2026-09-12", calendar: cal)
+
+        let weekdaysOnly = stats(days, now: now, outOfOffice: saturday, calendar: cal)
+        XCTAssertEqual(weekdaysOnly.effectiveWeeks, 1)
+        XCTAssertEqual(weekdaysOnly.outOfOfficeDays, 0)
+        XCTAssertEqual(try XCTUnwrap(weekdaysOnly.averageWork), 20 * 3600,
+                       "the day off is excluded, even though it was not a planned day")
+
+        let sevenDays = stats(days, now: now, outOfOffice: saturday, includeWeekends: true,
+                              calendar: cal)
+        XCTAssertEqual(sevenDays.effectiveWeeks, 6.0 / 7, accuracy: 1e-9)
+        XCTAssertEqual(sevenDays.outOfOfficeDays, 1)
+    }
+
+    func testInitDefaultsAssumeNobodyWasAway() {
+        let plain = WeeklyWorkStats(completedWeeks: 2, totalWork: 100)
+        XCTAssertEqual(plain.effectiveWeeks, 2)
+        XCTAssertEqual(plain.outOfOfficeDays, 0)
+        XCTAssertEqual(plain.averageWork, 50)
+    }
+
+    func testWeeksWithTimeOffNeitherOverNorUnderweightTheAverage() throws {
+        let cal = calendar()
+        // Three ordinary 40-hour weeks, one week with two days off and 24 hours
+        // worked in the other three (the same rate), and one with four days off.
+        let days = [
+            day(2026, 9, 7, hours: 40, calendar: cal),
+            day(2026, 9, 14, hours: 40, calendar: cal),
+            day(2026, 9, 21, hours: 40, calendar: cal),
+            day(2026, 9, 28, hours: 24, calendar: cal),
+            day(2026, 10, 7, hours: 8, calendar: cal),
+        ]
+        let result = stats(days, period: .year, now: date(2026, 10, 14, 12, calendar: cal),
+                           outOfOffice: away("2026-09-30", "2026-10-01",
+                                             "2026-10-05", "2026-10-06", "2026-10-08", "2026-10-09",
+                                             calendar: cal),
+                           calendar: cal)
+
+        XCTAssertEqual(result.completedWeeks, 5)
+        XCTAssertEqual(result.weeksWithTimeOff, 2)
+        XCTAssertEqual(result.outOfOfficeDays, 6)
+        XCTAssertEqual(result.effectiveWeeks, 3 + 0.6 + 0.2, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 40 * 3600, accuracy: 0.001,
+                       "every week ran at 40 hours of working time, so the average is 40")
+
+        // Counting those weeks whole would drag the average down.
+        let naive = stats(days, period: .year, now: date(2026, 10, 14, 12, calendar: cal),
+                          calendar: cal)
+        XCTAssertLessThan(try XCTUnwrap(naive.averageWork), 40 * 3600 - 3600)
+    }
+
+    func testWeeksEntirelyOffAreCountedWithoutNeedingARecordAndDoNotMoveTheAverage() throws {
+        let cal = calendar()
+        let days = [day(2026, 9, 7, hours: 40, calendar: cal)]
+        let off = away("2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
+                       calendar: cal)
+        let result = stats(days, now: date(2026, 9, 23, 12, calendar: cal), outOfOffice: off,
+                           calendar: cal)
+        XCTAssertEqual(result.weeksEntirelyOff, 1)
+        XCTAssertEqual(result.completedWeeks, 1)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 40 * 3600)
+    }
+
+    func testWeeksOffOutsideThePeriodOrStillRunningAreNotCounted() {
+        let cal = calendar()
+        let off = away("2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04",   // Crosses the month start.
+                       "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25",   // Not over yet.
+                       calendar: cal)
+        let result = stats([day(2026, 9, 9, hours: 40, calendar: cal)],
+                           now: date(2026, 9, 23, 12, calendar: cal), outOfOffice: off, calendar: cal)
+        XCTAssertEqual(result.weeksEntirelyOff, 0)
+        XCTAssertEqual(result.completedWeeks, 1)
+    }
+
+    func testWeekAfterATimeOffWeekStartsFromItsOwnWeight() throws {
+        let cal = calendar()
+        let result = stats([
+            day(2026, 9, 7, hours: 16, calendar: cal),   // Two of five days worked.
+            day(2026, 9, 14, hours: 40, calendar: cal),
+        ], now: date(2026, 9, 23, 12, calendar: cal),
+        outOfOffice: away("2026-09-09", "2026-09-10", "2026-09-11", calendar: cal), calendar: cal)
+
+        XCTAssertEqual(result.weeksWithTimeOff, 1)
+        XCTAssertEqual(try XCTUnwrap(result.averageWork), 56.0 / 1.4 * 3600, accuracy: 0.001)
     }
 }

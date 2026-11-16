@@ -85,7 +85,7 @@ public extension Store {
     func mirror(to tokens: [String], includeObservations: Bool, day: String,
                 home: URL = URL(fileURLWithPath: NSHomeDirectory()),
                 fm: FileManager = .default) -> (destinations: [String], errors: [String]) {
-        var files = [dailyCSVURL, rulesURL]
+        var files = [dailyCSVURL, rulesURL, outOfOfficeURL]
         if includeObservations {
             files.append(observationsURL(day))
             files.append(presenceURL(day))

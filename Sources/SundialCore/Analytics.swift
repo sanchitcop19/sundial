@@ -203,9 +203,12 @@ public struct RangeStats: Sendable, Equatable {
     /// The day still in progress. Excluded from anything describing a typical
     /// day, since a partial day would drag every average down.
     public var today: String?
+    /// Days spent away from work, including ones with nothing recorded.
+    public var outOfOffice: OutOfOffice
 
     public static func == (a: RangeStats, b: RangeStats) -> Bool {
         a.days == b.days && a.contexts.map(\.key) == b.contexts.map(\.key)
+            && a.outOfOffice == b.outOfOffice
     }
 
     public var totalWork: TimeInterval { days.reduce(0) { $0 + $1.totals.work } }
@@ -213,8 +216,13 @@ public struct RangeStats: Sendable, Equatable {
     public var totalUnclassified: TimeInterval { days.reduce(0) { $0 + $1.totals.unclassified } }
 
     /// Days with real work on them. Averaging over untracked days would make
-    /// every holiday look like a slow week.
-    public var activeDays: [DayStats] { days.filter { $0.totals.work > 60 } }
+    /// every holiday look like a slow week, and a few minutes of email on a day
+    /// marked out of office is not a short day either.
+    public var activeDays: [DayStats] {
+        days.filter { $0.totals.work > 60 && !outOfOffice.contains($0.day) }
+    }
+
+    public func isOutOfOffice(_ day: DayStats) -> Bool { outOfOffice.contains(day.day) }
 
     /// Active days that have actually finished.
     public var completedActiveDays: [DayStats] { activeDays.filter { $0.day != today } }
@@ -284,8 +292,10 @@ public struct RangeStats: Sendable, Equatable {
 
     public static func compute(days: [DayStats],
                                contexts: [(key: String, detail: String, seconds: TimeInterval)],
-                               today: String? = nil) -> RangeStats {
-        RangeStats(days: days.sorted { $0.day < $1.day }, contexts: contexts, today: today)
+                               today: String? = nil,
+                               outOfOffice: OutOfOffice = OutOfOffice()) -> RangeStats {
+        RangeStats(days: days.sorted { $0.day < $1.day }, contexts: contexts, today: today,
+                   outOfOffice: outOfOffice)
     }
 
     /// Rolls up where work time went across many days.
@@ -307,8 +317,9 @@ public struct RangeStats: Sendable, Equatable {
 
     public init(days: [DayStats],
                 contexts: [(key: String, detail: String, seconds: TimeInterval)],
-                today: String? = nil) {
+                today: String? = nil, outOfOffice: OutOfOffice = OutOfOffice()) {
         self.days = days; self.contexts = contexts; self.today = today
+        self.outOfOffice = outOfOffice
     }
 }
 
@@ -319,6 +330,7 @@ public extension Store {
     func stats(period: StatsPeriod = .week, rules: RuleSet, settings: Settings,
                calendar: Calendar = StatsPeriod.calendar, now: Date = Date(),
                currentDay: DayData? = nil) -> RangeStats {
+        let outOfOffice = loadOutOfOffice()
         let classifier = Classifier(rules: rules, settings: settings)
         let interval = period.interval(containing: now, calendar: calendar)
         let firstDay = Format.day(interval.start, calendar: calendar)
@@ -377,6 +389,6 @@ public extension Store {
         let segmentsByDay = done.map(\.1)
         return RangeStats.compute(days: stats,
                                   contexts: RangeStats.contexts(from: segmentsByDay),
-                                  today: today)
+                                  today: today, outOfOffice: outOfOffice)
     }
 }

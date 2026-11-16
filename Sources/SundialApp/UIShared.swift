@@ -62,8 +62,10 @@ struct TotalsRow: View {
 }
 
 struct SegmentRow: View {
-    let segment: Segment
+    let group: SegmentGroup
     var selected: Bool
+
+    private var segment: Segment { group.first }
 
     var body: some View {
         HStack(spacing: 11) {
@@ -85,9 +87,9 @@ struct SegmentRow: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(Format.duration(segment.duration))
+                Text(Format.duration(group.duration))
                     .font(Theme.figure(12, .medium)).monospacedDigit()
-                Text("\(Format.clock(segment.start))–\(Format.clock(segment.end))")
+                Text("\(Format.clock(group.start))–\(Format.clock(group.end))")
                     .font(.system(size: 9.5)).foregroundStyle(.tertiary).monospacedDigit()
             }
         }

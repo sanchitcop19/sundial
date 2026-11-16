@@ -58,7 +58,7 @@ final class InboxTests: XCTestCase {
         XCTAssertEqual(rules.rules.count, 1)
     }
 
-    /// A session the user started counts as time they were present for.
+    /// Phone time the user entered counts as time they were present for.
     func testSessionBecomesObservationAndPresence() throws {
         let start = Date().addingTimeInterval(-600)
         let span = ObservationSpan(start: start, end: start + 600,

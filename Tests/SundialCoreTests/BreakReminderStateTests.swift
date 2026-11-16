@@ -20,7 +20,7 @@ final class BreakReminderStateTests: XCTestCase {
         Breaks.status(segments: state.segmentsSinceSkip(
             segments ?? [segment(.work, from: -1500, to: seconds)]),
             now: t0 + seconds, settings: settings ?? self.settings,
-            snoozedUntil: state.quietUntil)
+            snoozedUntil: state.quietUntil, activeBreak: state.activeBreak)
     }
 
     func testRemindersWaitTwentyMinutesIncludingTheExactBoundary() {
@@ -130,16 +130,14 @@ final class BreakReminderStateTests: XCTestCase {
     func testSkippingAnOwedBreakDoesNotProduceABreakCompletion() {
         var state = BreakReminderState()
         var completion = BreakCompletionTracker()
-        let work = segment(.work, from: -1500, to: 0)
-        XCTAssertFalse(completion.update(segments: [work], now: t0, settings: settings))
+        XCTAssertFalse(completion.update(activeBreak: state.activeBreak, now: t0, settings: settings))
         state.skip(at: t0)
         completion.reset()
 
-        XCTAssertFalse(completion.update(segments: state.segmentsSinceSkip([work]),
+        XCTAssertFalse(completion.update(activeBreak: state.activeBreak,
                                          now: t0, settings: settings))
         for seconds in stride(from: 10.0, through: 300.0, by: 10) {
-            let segments = [work, segment(.away, from: 0, to: seconds)]
-            XCTAssertFalse(completion.update(segments: state.segmentsSinceSkip(segments),
+            XCTAssertFalse(completion.update(activeBreak: state.activeBreak,
                                              now: t0 + seconds, settings: settings),
                            "Skipping must not be reported as completing a break")
         }
@@ -216,5 +214,100 @@ final class BreakReminderStateTests: XCTestCase {
         XCTAssertNil(state.snoozedUntil)
         XCTAssertNil(state.skippedAt)
         XCTAssertTrue(status(state, at: 0).due)
+    }
+
+    func testLegacyReminderStateDecodesWithoutStartingABreak() throws {
+        let state = try JSONDecoder().decode(BreakReminderState.self, from: Data("{}".utf8))
+        XCTAssertNil(state.activeBreak)
+        XCTAssertNil(state.completedBreakAt)
+    }
+
+    func testReminderSnoozeAndSkipNeverStartABreak() {
+        var state = BreakReminderState()
+        state.recordReminder(at: t0)
+        XCTAssertNil(state.activeBreak)
+        state.snooze(at: t0 + 1)
+        XCTAssertNil(state.activeBreak)
+        state.skip(at: t0 + 2)
+        XCTAssertNil(state.activeBreak)
+    }
+
+    func testStartCreatesAFixedDeadlineAndCannotExtendAnActiveBreak() {
+        var state = BreakReminderState()
+        state.snooze(at: t0)
+        state.start(at: t0 + 1, length: 300)
+        XCTAssertEqual(state.activeBreak, Span(t0 + 1, t0 + 301))
+        XCTAssertNil(state.snoozedUntil)
+        state.start(at: t0 + 100, length: 900)
+        XCTAssertEqual(state.activeBreak, Span(t0 + 1, t0 + 301))
+        XCTAssertFalse(status(state, at: 120).owed)
+        XCTAssertFalse(status(state, at: 120).due)
+    }
+
+    func testInvalidDurationsCannotStartABreak() {
+        var state = BreakReminderState()
+        state.start(at: t0, length: 0)
+        XCTAssertNil(state.activeBreak)
+        state.start(at: t0, length: -1)
+        XCTAssertNil(state.activeBreak)
+        state.start(at: t0, length: .infinity)
+        XCTAssertNil(state.activeBreak)
+        state.start(at: t0, length: .nan)
+        XCTAssertNil(state.activeBreak)
+        state.start(at: t0, length: 24 * 3600 + 1)
+        XCTAssertNil(state.activeBreak)
+    }
+
+    func testFinishUsesTheDeadlineAndPreservesRecordedWork() {
+        var state = BreakReminderState()
+        state.start(at: t0, length: 300)
+        XCTAssertNil(state.finishBreak(at: t0 + 299))
+        XCTAssertNotNil(state.activeBreak)
+        XCTAssertEqual(state.finishBreak(at: t0 + 330), Span(t0, t0 + 300))
+        XCTAssertEqual(state.completedBreakAt, t0 + 300)
+        XCTAssertNil(state.activeBreak)
+        XCTAssertNil(state.finishBreak(at: t0 + 340))
+        let segments = [segment(.work, from: -1500, to: 330)]
+        XCTAssertEqual(state.segmentsSinceSkip(segments).first?.duration, 30)
+        XCTAssertEqual(segments.first?.duration, 1830)
+        XCTAssertEqual(status(state, at: 330, segments: segments).workedStraight, 30)
+    }
+
+    func testLatestSkipOrCompletionSetsTheReminderBoundary() {
+        var state = BreakReminderState()
+        state.skip(at: t0)
+        state.start(at: t0 + 10, length: 300)
+        state.finishBreak(at: t0 + 310)
+        XCTAssertEqual(status(state, at: 350).workedStraight, 40)
+        state.skip(at: t0 + 340)
+        XCTAssertEqual(status(state, at: 350).workedStraight, 10)
+    }
+
+    func testCancelDoesNotCreditACompletedBreak() {
+        var state = BreakReminderState()
+        state.start(at: t0, length: 300)
+        state.cancelBreak()
+        XCTAssertNil(state.activeBreak)
+        XCTAssertNil(state.completedBreakAt)
+        XCTAssertNil(state.finishBreak(at: t0 + 300))
+        XCTAssertTrue(status(state, at: 300).owed)
+    }
+
+    func testActiveSessionAndCompletionBoundarySurviveRestarts() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = Store(root: root)
+        var state = BreakReminderState()
+        state.start(at: t0, length: 300)
+        store.save(state)
+        state = Store(root: root).loadBreakReminderState()
+        XCTAssertEqual(state.activeBreak, Span(t0, t0 + 300))
+        XCTAssertEqual(status(state, at: 120).breakRemaining, 180)
+        state.finishBreak(at: t0 + 300)
+        store.save(state)
+        let restored = Store(root: root).loadBreakReminderState()
+        XCTAssertEqual(restored, state)
+        XCTAssertNil(restored.activeBreak)
+        XCTAssertEqual(restored.completedBreakAt, t0 + 300)
     }
 }

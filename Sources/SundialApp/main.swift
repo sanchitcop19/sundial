@@ -164,12 +164,13 @@ if args.count > 1, args[1] == "--breaks" {
     let reminderState = day == Format.day(Date()) ? store.loadBreakReminderState() : BreakReminderState()
     let status = Breaks.status(segments: reminderState.segmentsSinceSkip(segs), now: Date(),
                               settings: settings, snoozedUntil: reminderState.quietUntil,
-                              currentState: segs.last?.state ?? .away)
+                              currentState: segs.last?.state ?? .away, activeBreak: reminderState.activeBreak)
 
     print("Breaks on \(day)")
     print("  Reminders        \(settings.breakReminders ? "on" : "off")")
     print("  A break is due   after \(Format.duration(settings.workBeforeBreak)) of work")
-    print("  A break means    \(Format.duration(settings.breakLength)) away from work")
+    print("  Break length     \(Format.duration(settings.breakLength)), started manually")
+    print("  Countdown        \(status.countdownText)")
     print("  Worked straight  \(Format.duration(status.workedStraight))"
           + (status.owed ? "  — a break is owed" : "  (\(Format.duration(status.toGo)) to go)"))
     if let held = status.heldBack { print("  Held back        \(held)") }
@@ -340,10 +341,17 @@ if args.count > 1, args[1] == "--stats" {
         h == 0 ? "12a" : (h == 12 ? "12p" : (h < 12 ? "\(h)a" : "\(h - 12)p"))
     }
     if period != .week {
-        let weekly = s.weeklyWorkStats(period: period, now: now, calendar: calendar)
+        let weekly = s.weeklyWorkStats(period: period, now: now,
+                                       includeWeekends: store.loadSettings().includeWeekendsInWorkTarget,
+                                       calendar: calendar)
         if let average = weekly.averageWork {
             print("  Average week      \(Format.duration(average))"
-                  + "  over \(weekly.completedWeeks) complete calendar week(s), current week excluded")
+                  + "  over \(weekly.completedWeeks) complete calendar week(s), current week excluded"
+                  + (weekly.weeksWithTimeOff > 0
+                     ? "; \(weekly.outOfOfficeDays) day(s) off across \(weekly.weeksWithTimeOff) week(s)"
+                       + " count as \(String(format: "%.1f", weekly.effectiveWeeks)) weeks of work" : "")
+                  + (weekly.weeksEntirelyOff > 0
+                     ? "; \(weekly.weeksEntirelyOff) week(s) entirely off not counted" : ""))
         } else {
             print("  Average week      —  (no complete weeks with records yet)")
         }
@@ -391,7 +399,7 @@ if args.count > 1, args[1] == "--stats" {
             }
         }.joined(separator: " ")
         let total = Format.duration(d.totals.work).padding(toLength: 8, withPad: " ", startingAt: 0)
-        let marker = d.day == s.today ? "~" : (d.isWeekend ? "*" : " ")
+        let marker = d.day == s.today ? "~" : (s.isOutOfOffice(d) ? "o" : (d.isWeekend ? "*" : " "))
         print("  \(d.day)\(marker) \(total)\(cells)")
     }
 

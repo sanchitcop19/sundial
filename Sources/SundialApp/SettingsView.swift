@@ -12,6 +12,65 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                Card(title: "Menu bar") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("Show", selection: Binding(
+                            get: { engine.settings.menuBarTimeDisplay },
+                            set: { engine.settings.menuBarTimeDisplay = $0 })) {
+                                Text("Hours worked").tag(MenuBarTimeDisplay.worked)
+                                Text("Hours remaining").tag(MenuBarTimeDisplay.remaining)
+                                Text("Both").tag(MenuBarTimeDisplay.both)
+                            }
+                            .pickerStyle(.segmented)
+                        Text("Times use hours:minutes. Hover over the menu bar to see both.")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                }
+
+                Card(title: "Daily work target") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        slider("Usual hours per day",
+                               value: Binding(get: { engine.settings.dailyWorkTarget },
+                                              set: { engine.settings.dailyWorkTarget = $0 }),
+                               range: 900...86400, step: 900,
+                               help: "Without smart adjustment, this target applies every day, including weekends.")
+                        Toggle("Adjust daily target toward a weekly goal", isOn: Binding(
+                            get: { engine.settings.smartWorkTargetEnabled },
+                            set: { engine.settings.smartWorkTargetEnabled = $0 }))
+                        if engine.settings.smartWorkTargetEnabled {
+                            slider("Hours per week",
+                                   value: Binding(get: { engine.settings.weeklyWorkTarget },
+                                                  set: { engine.settings.weeklyWorkTarget = $0 }),
+                                   range: 3600...604800, step: 3600,
+                                   help: "Weeks run Monday–Sunday. All recorded work counts toward this goal.")
+                            Picker("Planned work days", selection: Binding(
+                                get: { engine.settings.includeWeekendsInWorkTarget },
+                                set: { engine.settings.includeWeekendsInWorkTarget = $0 })) {
+                                    Text("Monday–Friday").tag(false)
+                                    Text("All 7 days").tag(true)
+                                }
+                                .pickerStyle(.segmented)
+                            Text("Completed days adjust the target by up to 25% from your usual day. "
+                                 + "It can be shorter when the weekly goal is nearly reached. "
+                                 + "Today’s work lowers the time left without raising today’s target.")
+                                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                            Text(engine.workTargetLabel)
+                                .font(.system(size: 12, weight: .medium)).monospacedDigit()
+                            if let week = engine.workTargetWeekSummary {
+                                Text(week).font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                            if let note = engine.workTargetNote {
+                                Text(note).font(.system(size: 10))
+                                    .foregroundStyle(engine.workTarget.isCapped ? Color.orange : Color.secondary)
+                            }
+                        }
+                    }
+                }
+
+                OutOfOfficeSettingsView()
+
+                PhoneSyncSettingsView(sync: engine.phoneSync)
+
                 Card(title: "Permissions") {
                     VStack(alignment: .leading, spacing: 8) {
                         permissionRow(
@@ -85,18 +144,15 @@ struct SettingsView: View {
                                    help: "Counted as work, not as time at the desk. Idle time, "
                                        + "personal time and meetings do not add to it, so this is "
                                        + "a real hour of work rather than an hour on the clock.")
-                            slider("A break means being away for",
+                            slider("Break length",
                                    value: Binding(get: { engine.settings.breakLength },
                                                   set: { engine.settings.breakLength = $0 }),
                                    range: 60...1800, step: 60,
-                                   help: "Step away for this long and the count starts again. "
-                                       + "After a break is due, Sundial also notifies you when "
-                                       + "your break is over. Brief work-app glances (up to "
-                                       + "15 seconds total) pause the break timer instead of "
-                                       + "starting it over.")
-                            Text(engine.breakStatus.owed
-                                 ? "Break due after \(Format.duration(engine.breakStatus.workedStraight)) of work."
-                                 : "\(Format.duration(engine.breakStatus.toGo)) of work to go.")
+                                   help: "Choose Start break in the reminder or menu bar to begin "
+                                       + "this countdown. The reminder also offers Snooze and Skip. "
+                                       + "Sundial notifies you when the timer ends; switching apps "
+                                       + "does not pause or restart it.")
+                            Text(engine.breakCountdownText ?? "")
                                 .font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                     }

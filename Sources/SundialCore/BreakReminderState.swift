@@ -5,6 +5,8 @@ public struct BreakReminderState: Codable, Equatable, Sendable {
     public private(set) var lastRemindedAt: Date?
     public private(set) var snoozedUntil: Date?
     public private(set) var skippedAt: Date?
+    public private(set) var activeBreak: Span?
+    public private(set) var completedBreakAt: Date?
 
     public init() {}
 
@@ -26,6 +28,30 @@ public struct BreakReminderState: Codable, Equatable, Sendable {
         snoozedUntil = nil
     }
 
+    /// Only an explicit Start action creates a timed break. Repeated actions
+    /// cannot extend a break that is already running.
+    public mutating func start(at now: Date, length: TimeInterval) {
+        guard activeBreak == nil, now.timeIntervalSince1970.isFinite,
+              length.isFinite, length > 0, length <= 24 * 3600 else { return }
+        activeBreak = Span(now, now.addingTimeInterval(length))
+        snoozedUntil = nil
+    }
+
+    /// Keep the original deadline as the new work-cycle boundary even if the
+    /// app notices completion later, such as when the computer wakes.
+    @discardableResult
+    public mutating func finishBreak(at now: Date) -> Span? {
+        guard let activeBreak, now >= activeBreak.end else { return nil }
+        completedBreakAt = activeBreak.end
+        self.activeBreak = nil
+        snoozedUntil = nil
+        return activeBreak
+    }
+
+    public mutating func cancelBreak() {
+        activeBreak = nil
+    }
+
     /// Skip this owed break and begin counting a fresh work interval.
     public mutating func skip(at now: Date) {
         skippedAt = now
@@ -34,11 +60,12 @@ public struct BreakReminderState: Codable, Equatable, Sendable {
 
     /// Only the reminder clock resets; daily totals retain all the actual work.
     public func segmentsSinceSkip(_ segments: [Segment]) -> [Segment] {
-        guard let skippedAt else { return segments }
+        guard let boundary = [skippedAt, completedBreakAt].compactMap({ $0 }).max()
+            else { return segments }
         return segments.compactMap { segment in
-            guard segment.end > skippedAt else { return nil }
+            guard segment.end > boundary else { return nil }
             var clipped = segment
-            clipped.start = max(segment.start, skippedAt)
+            clipped.start = max(segment.start, boundary)
             return clipped
         }
     }

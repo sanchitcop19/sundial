@@ -9,7 +9,9 @@ worked out afterwards from rules you can change, and time nobody observed is
 left honestly blank.
 
 Your activity record stays on your machine unless you enable backup to a folder
-you choose. No account, no server, no screenshots.
+you choose. Optional iPhone sync shares work totals and targets through iCloud
+Drive, selected backup folders, and Apple push notifications. No Sundial account
+or hosted backend, and no screenshots.
 
 **[Download Sundial for macOS](https://github.com/sanchitcop19/sundial/releases/latest)**
 — requires macOS 14 or later. Open the DMG and drag Sundial into Applications.
@@ -74,13 +76,56 @@ earned.
 
 | Icon | Meaning |
 |---|---|
-| ● pulsing | Work, and you are here. The number beside it is climbing |
+| ● pulsing | Work, and you are here. Worked time climbs; remaining time falls |
 | ● fading | Still counted as work, but quiet: it dims as the away cutoff approaches |
 | ○ | Personal. Same fade, never a pulse — the work total is not moving |
 | ◌ | Away. Nothing is being counted |
 | ? | Nothing matched. Open the menu and give it a rule |
 | ⏸ | Paused |
 | ☕ after the total | A break is owed |
+
+Under **Settings → Menu bar**, choose **Hours worked** (`6:31`),
+**Hours remaining** (`1:29 left`), or **Both** (`6:31 · 1:29 left`, the default).
+The choice is saved and takes effect immediately. Hover over the menu bar to
+see both values in any mode. Remaining time shows overtime after reaching the
+target, or “No target” on days without one.
+
+The daily target starts at 8 hours; change it under **Settings → Daily work target**.
+The target applies every day, including weekends.
+
+Optional **Adjust daily target toward a weekly goal** starts with a 40-hour
+Monday–Sunday week and planned work on Monday–Friday; you can choose all seven
+days. Completed days move today's target toward the remaining weekly pace,
+within 25% of your usual daily hours (6–10 hours for an 8-hour day). A nearly
+completed weekly goal can shorten it further. Today's accumulating work reduces
+the time left without increasing its target. Weekend work always counts toward
+the week, including on unplanned days. If the required pace exceeds the daily
+limit, Today and the menu show that pace and the weekly remainder explicitly.
+Smart adjustment starts off, so the existing 8-hour daily target is preserved.
+
+### Out of office
+
+Mark holidays and leave under **Settings → Out of office** (pick a range and
+choose **Add**), or use **Out of office** on the Today tab or **Out of Office
+Today** in the menu bar for the current day. A day off has no daily target. It
+also takes its share off the weekly goal: with a 40-hour week and Friday off,
+the goal for that week is 32 hours, and the remaining time is spread over the
+remaining planned days. Marking a Saturday off in a Monday–Friday week changes
+nothing, since it was never a planned day. A week with every planned day off has
+no weekly target.
+
+Days off are also left out of statistics. They do not count as a day in the
+average day or in the typical start, finish and focus figures, and they appear
+grey in the daily chart. In the average weekly hours, weeks with time off are included and weighted by the
+planned days actually worked: one day off in five makes a week count as 0.8 of
+a week, so four days of work in it is an ordinary week. Counting it whole would
+pull the average down, and dropping it would over-weight every other week. A
+week with every planned day off has nothing to weigh, so the Stats tab counts it
+separately and it cannot move the average.
+
+Work you do on a day off is still work: it counts in totals and toward that
+week's goal, but is not used when working out what a typical day or week looks
+like. Days off are stored in `out-of-office.json` and included in backups.
 
 The pulse is the honest part. A stretch stays *work* for the whole two minutes
 before the idle cutoff, so a dot that looked identical the moment you stopped
@@ -163,12 +208,12 @@ not wall clock**. Twenty-five minutes means twenty-five minutes of actual work.
 Idle time, personal time and the stretch you spent making coffee do not add to
 it, because the tracker already knows the difference.
 
-- A break is time away from work at least as long as your break setting.
-  Up to 15 seconds of work-app activity within the break is tolerated, so a
-  quick glance does not erase your progress. Those work seconds pause the
-  break timer; they do not help complete it. Longer work activity restarts it.
-- Shorter interruptions are ignored: glancing at a message neither resets the
-  count nor adds to it.
+- Breaks start only when you choose **Start break** in the notification,
+  fallback panel, or menu bar. The countdown runs for your configured break
+  length, even if you switch apps. Being idle or opening a personal app never
+  starts a break timer or a completion alert.
+- Time away still counts as rest when calculating how much work remains until
+  the next reminder. Short interruptions neither reset nor add to that work count.
 - Nothing is said while you are **already away** from the machine, or **in a
   call**. The break stays owed; the reminder waits for a moment when it is
   worth having.
@@ -177,12 +222,11 @@ it, because the tracker already knows the difference.
 - **Skip break** clears the reminder and starts a fresh work interval before
   another break is due. It is available in the notification, fallback panel,
   and menu bar. Skipping does not change recorded work or daily statistics.
-  Reminder timing and skips survive app restarts.
+  Reminder choices and a running break timer survive app restarts.
 - The menu bar shows a small ☕ next to the total for as long as a break is
   owed, so the feature still works if you never grant notification access.
-- Once a break is owed, taking a full break produces a single **Your break is
-  over** notification with sound. It uses the configured break length and the
-  same away, personal or unclassified time that resets the work count. If
+- A manually started timer produces a single **Your break is over** notification
+  with sound when it ends, then begins a fresh work interval. If
   notifications are denied, it appears in Sundial's small reminder panel.
   Completion alerts are suppressed during calls and after a long sleep or
   tracking pause, so returning to the Mac does not announce an old break.
@@ -371,34 +415,46 @@ accepted.
 
 ## On your phone
 
-`ios/` holds a companion app. It is a companion rather than a second tracker,
-and the reason is a hard limit rather than a shortcut: **iOS gives no app any
-way to see which other app you are using.** Screen Time's `DeviceActivity` data
-is rendered inside its own extension and cannot be read even by the app that
-hosts it. Anything claiming to track your phone automatically is either
-guessing or is a VPN/MDM profile watching your traffic.
+`ios/` holds the iOS 17+ companion and its Live Activity extension. It shows the
+Mac's worked hours and time remaining on the Lock Screen and Dynamic Island.
+It also offers recent days, review, and duration-based phone-work entries.
+It does not automatically track activity in other iPhone apps.
 
-So the phone does the parts it is genuinely good at:
+In Mac **Settings → iPhone Live Activity**, enable **Sync work progress to
+iPhone**. The Mac creates **iCloud Drive → Sundial** for the progress summary.
+On iPhone, choose that existing folder in Files, wait for current totals, then tap **Start Live Activity** in
+Today. The Mac writes `work-progress.json` about once a minute while totals change,
+or every three minutes when unchanged; the iPhone refreshes from the folder every
+30 seconds while open. Live Activity pushes follow the same cadence, while
+connection and schedule checks continue every minute.
 
-- **Review, anywhere.** The queue of unclassified time, with the same scope
-  ladder the Mac offers. Deciding on the sofa teaches the Mac a rule for good.
-- **Your day at a glance.** Today's totals, recent days, the stretch list.
-- **Phone work you start yourself.** A labelled session with a stopwatch,
-  recorded as your own entry and never presented as something measured.
+Phone sync does not enable raw-record backup to iCloud. Existing selected backup
+folders also receive the summary; use one if iCloud Drive is unavailable on the Mac.
 
-Sync is over the same cloud folder the Mac backs up to — pick it once with the
-file picker, no account and no server. The Mac owns the mirrored files, so the
-phone never writes to them; it drops small files into an `inbox` folder that the
-Mac drains on its backup cadence. One writer per file, nothing to conflict.
+For updates while the phone is locked, import an APNs-capable Apple `.p8` key
+with its Key ID and Team ID in Mac Settings. The credentials stay in that Mac's
+Keychain; the Mac sends updates directly through Apple, without a hosted
+Sundial backend. An App Store Connect API key cannot substitute for an APNs key.
+
+The display keeps the last reported totals and marks them stale after five
+minutes or at the Mac's midnight. It never estimates additional work between
+updates. Each Live Activity lasts up to eight hours; open Sundial to start
+another. Cloud delivery, background refresh, and Apple push scheduling can add
+delay. See the [iPhone Live Activity setup guide](docs/iphone-live-activity.md)
+for signing, credentials, and device verification.
 
 ```bash
-cd ios && xcodegen generate
+cd ios
+xcodegen generate
 open SundialMobile.xcodeproj
 ```
 
-Turn on **Include the raw record** in the Mac app's backup settings, or the
-phone can only show daily totals — it needs the observations to rebuild the
-timeline and the review queue.
+The progress summary contains no app names or window titles. Existing backup
+files in the same folder can contain rules and activity records. **Include the
+raw record** is needed only to rebuild the phone's timeline and review queue;
+the Live Activity needs the summary alone. Phone edits go into `inbox/`, while
+Live Activity registrations go into `live-activities/`; the Mac owns its
+mirrored data files.
 
 ## Coming from another tracker
 
@@ -440,12 +496,13 @@ than merged.
 | `days/observations-*.jsonl` | What was on screen, one line per stretch. The source of truth |
 | `days/presence-*.json` | When you typed, when the screen was locked, when a call was on |
 | `rules.json` | Your rules, in the order they apply |
+| `out-of-office.json` | Days marked as out of office |
 | `daily.csv` | One row per day, with decimal hours for charting |
 
 Because verdicts are derived, `daily.csv` and every total can be rebuilt from
-the raw record at any time. Optional backup copies the CSV and your rules to
-iCloud Drive, Dropbox, Google Drive or OneDrive — a copy rather than a symlink,
-since the CSV is written with an atomic replace that would destroy one.
+the raw record at any time. Optional backup copies the CSV, your rules and your
+days off to iCloud Drive, Dropbox, Google Drive or OneDrive — a copy rather than
+a symlink, since the CSV is written with an atomic replace that would destroy one.
 
 ## Development
 

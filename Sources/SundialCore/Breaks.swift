@@ -19,11 +19,39 @@ public struct BreakStatus: Equatable, Sendable {
     public var toGo: TimeInterval
     /// Why nothing was said, when something otherwise would have been.
     public var heldBack: String?
+    /// Countdown including any remaining snooze or reminder quiet period.
+    public var nextBreakIn: TimeInterval
+    /// Time remaining in the break the user explicitly started.
+    /// Nil outside an active break; zero after the break has finished.
+    public var breakRemaining: TimeInterval?
+    public var breakEndsAt: Date?
 
     public init(workedStraight: TimeInterval, owed: Bool, due: Bool,
-                toGo: TimeInterval, heldBack: String?) {
+                toGo: TimeInterval, heldBack: String?, nextBreakIn: TimeInterval? = nil,
+                breakRemaining: TimeInterval? = nil, breakEndsAt: Date? = nil) {
         self.workedStraight = workedStraight; self.owed = owed; self.due = due
         self.toGo = toGo; self.heldBack = heldBack
+        self.nextBreakIn = nextBreakIn ?? toGo
+        self.breakRemaining = breakRemaining
+        self.breakEndsAt = breakEndsAt
+    }
+
+    public var countdownText: String {
+        countdownText(after: 0, currentState: .work)
+    }
+
+    /// Smooth the display between samples without changing recorded progress.
+    public func countdownText(after elapsed: TimeInterval, currentState: TimeCategory) -> String {
+        let elapsed = max(0, elapsed)
+        let workElapsed = currentState == .work ? elapsed : 0
+        let remaining = breakRemaining.map { $0 - elapsed }
+            ?? max(toGo - workElapsed, nextBreakIn - elapsed)
+        guard remaining > 0 else {
+            return breakRemaining == nil ? "Break due now" : "Break complete"
+        }
+        let seconds = Int(remaining.rounded(.up))
+        let time = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        return breakRemaining == nil ? "Next break in \(time)" : "Break ends in \(time)"
     }
 }
 
@@ -49,13 +77,20 @@ public enum Breaks {
     /// interrupting someone who has just sat down.
     public static func status(segments: [Segment], now: Date, settings: Settings,
                               snoozedUntil: Date? = nil, inCall: Bool = false,
-                              currentState: TimeCategory = .work) -> BreakStatus {
+                              currentState: TimeCategory = .work,
+                              activeBreak: Span? = nil) -> BreakStatus {
         guard settings.breakReminders, settings.workBeforeBreak > 0 else {
             return BreakStatus(workedStraight: 0, owed: false, due: false,
                                toGo: settings.workBeforeBreak, heldBack: nil)
         }
-        let worked = progress(segments: segments, breakLength: settings.breakLength).worked
-        let owed = worked >= settings.workBeforeBreak
+        let worked = progress(segments: segments, breakLength: settings.breakLength)
+        let activeBreak = activeBreak.flatMap { span in
+            span.start <= now && span.duration > 0 && span.duration <= 24 * 3600
+                && span.end.timeIntervalSince1970.isFinite ? span : nil
+        }
+        let owed = activeBreak == nil && worked >= settings.workBeforeBreak
+        let toGo = max(0, settings.workBeforeBreak - worked)
+        let quietRemaining = max(0, snoozedUntil?.timeIntervalSince(now) ?? 0)
         var heldBack: String?
         if owed {
             if let until = snoozedUntil, until > now {
@@ -68,20 +103,20 @@ public enum Breaks {
         }
         return BreakStatus(workedStraight: worked, owed: owed,
                            due: owed && heldBack == nil,
-                           toGo: max(0, settings.workBeforeBreak - worked),
-                           heldBack: heldBack)
+                           toGo: toGo, heldBack: heldBack,
+                           nextBreakIn: max(toGo, quietRemaining),
+                           breakRemaining: activeBreak.map { max(0, $0.end.timeIntervalSince(now)) },
+                           breakEndsAt: activeBreak?.end)
     }
 
-    /// Shared by the owed reminder and completion alert, so they always agree
-    /// on whether a break happened. Classification and daily totals stay intact.
-    fileprivate static func progress(segments: [Segment], breakLength: TimeInterval)
-        -> (worked: TimeInterval, completedBreak: Span?) {
+    /// Passive rest credits the reminder work clock without starting a timer
+    /// or producing a completion alert. Recorded classification stays intact.
+    private static func progress(segments: [Segment], breakLength: TimeInterval) -> TimeInterval {
         var worked: TimeInterval = 0
         var rest: TimeInterval = 0
         var interruptions: TimeInterval = 0
         var windowStart = 0
         var previousEnd: Date?
-        var completedBreak: Span?
 
         for (index, segment) in segments.enumerated() {
             // Unknown time cannot join two otherwise separate breaks. Allow the
@@ -110,51 +145,38 @@ public enum Breaks {
             }
             if segment.state != .work, rest >= breakLength, windowStart <= index {
                 worked = 0
-                completedBreak = Span(segments[windowStart].start, segment.end)
             }
         }
-        return (worked, completedBreak)
+        return worked
     }
 }
 
-/// Watches live samples for the end of an owed break. Historical classification
-/// alone must never produce a notification when the app starts or a rule changes.
+/// Only an explicitly started break can produce a completion notification.
+/// Historical or missed completions stay silent when the app starts or wakes.
 public struct BreakCompletionTracker: Sendable {
-    private var awaitingBreakSince: Date?
+    private var observedBreak: Span?
     private var lastUpdate: Date?
 
     public init() {}
 
     public mutating func reset() {
-        awaitingBreakSince = nil
+        observedBreak = nil
         lastUpdate = nil
     }
 
-    /// Returns true once, when an observed work cycle gets a full break.
+    /// Returns true once, when an observed break reaches its fixed deadline.
     /// Long sampling gaps discard the alert rather than announcing an old break
     /// on wake. Calls also suppress completion, without saving an alert for later.
-    public mutating func update(segments: [Segment], now: Date, settings: Settings,
+    public mutating func update(activeBreak: Span?, now: Date, settings: Settings,
                                 inCall: Bool = false) -> Bool {
-        if let lastUpdate, now < lastUpdate
-            || now.timeIntervalSince(lastUpdate) > settings.maxSampleGap {
-            reset()
+        defer {
+            observedBreak = settings.breakReminders ? activeBreak : nil
+            lastUpdate = now
         }
-        lastUpdate = now
-        guard settings.breakReminders, settings.breakLength > 0, settings.workBeforeBreak > 0 else {
-            awaitingBreakSince = nil
-            return false
-        }
-
-        let status = Breaks.status(segments: segments, now: now, settings: settings)
-        if segments.last?.state == .work, status.owed, awaitingBreakSince == nil {
-            awaitingBreakSince = now
-        }
-        guard let awaitingBreakSince,
-              let completed = Breaks.progress(segments: segments,
-                                               breakLength: settings.breakLength).completedBreak,
-              completed.end > awaitingBreakSince, completed.end <= now,
-              now.timeIntervalSince(completed.end) <= settings.maxSampleGap else { return false }
-        self.awaitingBreakSince = nil
+        guard settings.breakReminders, settings.breakLength > 0, settings.workBeforeBreak > 0,
+              let activeBreak, observedBreak == activeBreak, let lastUpdate,
+              now >= lastUpdate, now.timeIntervalSince(lastUpdate) <= settings.maxSampleGap,
+              lastUpdate < activeBreak.end, now >= activeBreak.end else { return false }
         return !inCall
     }
 }

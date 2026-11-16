@@ -20,6 +20,7 @@ enum Theme {
     // MARK: - Meaning
 
     static let work = Color(light: 0x1FA971, dark: 0x3DDC97)
+    static let overtime = Color(light: 0xC83B45, dark: 0xFF6B6B)
     static let personal = Color(light: 0x4E6EF2, dark: 0x7C9BFF)
     static let away = Color(light: 0x9AA1AC, dark: 0x596170)
     static let unclassified = Color(light: 0xD9840F, dark: 0xF5B14C)

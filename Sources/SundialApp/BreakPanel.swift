@@ -13,6 +13,7 @@ final class BreakPanel {
     private var panel: NSPanel?
     private var timer: Timer?
 
+    var onStart: (() -> Void)?
     var onSnooze: (() -> Void)?
     var onSkip: (() -> Void)?
 
@@ -20,6 +21,7 @@ final class BreakPanel {
         close()
         let view = BreakPanelView(
             reminder: reminder,
+            start: { [weak self] in self?.onStart?(); self?.close() },
             snooze: { [weak self] in self?.onSnooze?(); self?.close() },
             skip: { [weak self] in self?.onSkip?(); self?.close() },
             dismiss: { [weak self] in self?.close() })
@@ -63,6 +65,7 @@ final class BreakPanel {
 
 private struct BreakPanelView: View {
     let reminder: BreakReminder
+    let start: () -> Void
     let snooze: () -> Void
     let skip: () -> Void
     let dismiss: () -> Void
@@ -78,11 +81,13 @@ private struct BreakPanelView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 HStack(spacing: 7) {
                     if reminder.canSnooze {
+                        Button("Start break", action: start).controlSize(.small)
                         Button("Snooze \(Int(Breaks.snooze / 60)) min", action: snooze)
                             .controlSize(.small)
                         Button("Skip break", action: skip).controlSize(.small)
+                    } else {
+                        Button("Dismiss", action: dismiss).controlSize(.small)
                     }
-                    Button("Dismiss", action: dismiss).controlSize(.small)
                 }
                 .padding(.top, 3)
             }

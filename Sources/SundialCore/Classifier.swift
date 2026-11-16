@@ -17,6 +17,9 @@ public struct Classifier: Sendable {
     public func classify(observations: [ObservationSpan], presence: PresenceLog,
                          within window: Span? = nil) -> [Segment] {
         let obs = observations.sorted { $0.start < $1.start }
+        // Time the user entered from the phone is a statement, not a sample, so
+        // the Mac being locked, asleep or busy elsewhere cannot contradict it.
+        let phone = obs.filter { $0.snapshot.bundleId == MobileSession.bundleId }
         var presence = presence
         presence.normalise()
 
@@ -29,6 +32,10 @@ public struct Classifier: Sendable {
         for i in 0..<(cuts.count - 1) {
             let a = cuts[i], b = cuts[i + 1]
             guard b > a else { continue }
+            if let stated = phone.first(where: { $0.start <= a && a < $0.end }) {
+                raw.append(judge(stated.snapshot, from: a, to: b))
+                continue
+            }
             raw.append(decide(from: a, to: b, obs: obs, presence: presence, judged: &judged))
         }
         return coalesce(raw)

@@ -5,7 +5,7 @@ import SundialCore
 extension TimeCategory {
     var color: Color {
         switch self {
-        case .work:         return Color(red: 0.20, green: 0.65, blue: 0.42)
+        case .work:         return MobileTheme.accent
         case .personal:     return Color(red: 0.35, green: 0.52, blue: 0.85)
         case .away:         return Color.secondary.opacity(0.35)
         case .unclassified: return Color(red: 0.92, green: 0.58, blue: 0.16)
@@ -24,12 +24,12 @@ struct ConnectView: View {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .font(.system(size: 44)).foregroundStyle(.tint)
             Text("Connect to your Mac").font(.title2.weight(.semibold))
-            Text("Sundial on your Mac backs its record up to a cloud folder. "
-                 + "Point this app at the same folder and you can see your day and "
-                 + "work through the review queue from here.")
+            Text("In Sundial on your Mac, enable Sync work progress to iPhone. "
+                 + "Your Mac creates a Sundial folder in iCloud Drive. Choose that existing folder here to see hours worked and remaining, "
+                 + "then start a Live Activity for your Lock Screen.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).padding(.horizontal, 28)
-            Text("Usually iCloud Drive › Sundial")
+            Text("Use the same cloud storage account on both devices.")
                 .font(.footnote).foregroundStyle(.tertiary)
             Button("Choose folder…") { picking = true }
                 .buttonStyle(.borderedProminent).controlSize(.large)
@@ -37,8 +37,8 @@ struct ConnectView: View {
                 Text(s).font(.footnote).foregroundStyle(.orange).padding(.horizontal, 28)
             }
             Spacer()
-            Text("Your phone cannot see which app you are using — iOS has no such API. "
-                 + "This shows the Mac's record and tracks phone work you start yourself.")
+            Text("The progress summary contains totals, not activity titles. "
+                 + "You can also sync the raw record from your Mac to review activities here.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.bottom, 12)
         }
@@ -54,6 +54,8 @@ struct TodayView: View {
     var body: some View {
         NavigationStack {
             List {
+                WorkProgressSection()
+                if library.hasDetail || !library.daily.isEmpty {
                 Section {
                     ForEach(TimeCategory.allCases, id: \.self) { c in
                         let v = library.totals.byState[c] ?? 0
@@ -66,7 +68,8 @@ struct TodayView: View {
                             }
                         }
                     }
-                } header: { Text(library.day) }
+                } header: { Text("Record · \(library.day)") }
+                }
 
                 if let s = library.status {
                     Section { Text(s).font(.footnote).foregroundStyle(.secondary) }
@@ -239,46 +242,117 @@ struct ScopeSheet: View {
     }
 }
 
-/// Phone work is user-started by necessity, and the app says so rather than
-/// implying it was measured.
-struct SessionView: View {
+/// Phone time is entered explicitly because iOS cannot observe other apps.
+struct DurationEntryView: View {
     @EnvironmentObject var library: Library
     @State private var label = "Phone"
     @State private var outcome: Outcome = .work
-    @State private var now = Date()
+    @State private var hours = 0
+    @State private var minutes = 30
 
-    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private var duration: TimeInterval {
+        TimeInterval((hours * 60 + minutes) * 60)
+    }
+
+    private var canSend: Bool {
+        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && duration > 0
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                if let s = library.activeSession {
-                    Section {
-                        VStack(spacing: 8) {
-                            Text(Format.duration(now.timeIntervalSince(s.start)))
-                                .font(.system(size: 44, weight: .light, design: .rounded))
-                                .monospacedDigit()
-                            Text("\(s.label) · \(s.outcome.label)")
-                                .font(.callout).foregroundStyle(.secondary)
+                Section("Add phone time") {
+                    TextField("Label", text: $label)
+                    Picker("Counts as", selection: $outcome) {
+                        ForEach(Outcome.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    LabeledContent("Duration") {
+                        HStack(spacing: 6) {
+                            Picker("Hours", selection: $hours) {
+                                ForEach(0...23, id: \.self) { value in
+                                    Text("\(value) hr").tag(value)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+
+                            Picker("Minutes", selection: $minutes) {
+                                ForEach(0...59, id: \.self) { value in
+                                    Text("\(value) min").tag(value)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
                         }
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
-                        Button("Stop and send to Mac", role: .destructive) { library.stopSession() }
                     }
-                } else {
-                    Section("What are you doing?") {
-                        TextField("Label", text: $label)
-                        Picker("Counts as", selection: $outcome) {
-                            ForEach(Outcome.allCases, id: \.self) { Text($0.label).tag($0) }
-                        }.pickerStyle(.segmented)
-                        Button("Start") { library.startSession(label: label, outcome: outcome) }
-                            .disabled(label.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                    Button {
+                        library.sendDuration(label: label, outcome: outcome, duration: duration)
+                    } label: {
+                        Label("Send to Mac", systemImage: "paperplane.fill")
+                            .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSend)
+                }
+
+                Section {
+                    if let running = library.timer {
+                        VStack(spacing: 4) {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text(Format.clockDuration(running.elapsed(at: context.date)))
+                                    .font(.system(size: 44, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                            }
+                            Text("\(running.label) · counts as \(running.outcome.label.lowercased())")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+
+                        Button {
+                            library.stopTimer()
+                        } label: {
+                            Label("Stop and send to Mac", systemImage: "stop.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Discard timer", role: .destructive) { library.discardTimer() }
+                    } else {
+                        Button {
+                            library.startTimer(label: label, outcome: outcome)
+                        } label: {
+                            Label("Start timer", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } header: {
+                    Text("Timer")
+                } footer: {
+                    Text(library.timer == nil
+                         ? "Uses the label and type above. Nothing is sent until you stop it."
+                         : "Keeps running if you close the app.")
+                }
+                .animation(MobileTheme.motion, value: library.timer)
+
+                if let status = library.durationStatus {
+                    Section {
+                        Label(status.message, systemImage: status.systemImage)
+                            .font(.callout)
+                            .foregroundStyle(status.isFailure ? Color.orange : MobileTheme.accent)
+                    }
+                    .transition(.opacity.combined(with: .offset(y: 6)))
                 }
 
                 Section {
                     Text("iOS gives no app any way to see which other app you are using, so "
-                         + "phone time has to be started by you. It is recorded as your own "
-                         + "entry, never presented as something measured.")
+                         + "phone time has to be entered by you. The duration ends when you "
+                         + "tap Send and is never presented as something Sundial measured.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -292,8 +366,8 @@ struct SessionView: View {
                     Button("Disconnect", role: .destructive) { library.disconnect() }
                 }
             }
-            .navigationTitle("Session")
-            .onReceive(tick) { now = $0 }
+            .navigationTitle("Add Time")
+            .animation(MobileTheme.motion, value: library.durationStatus)
         }
     }
 }

@@ -7,15 +7,28 @@ options:
 packages:
   Sundial:
     path: ../
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""  # set your Apple Team ID locally
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+  configs:
+    Debug:
+      APS_ENVIRONMENT: development
+    Release:
+      APS_ENVIRONMENT: production
 targets:
   SundialMobile:
     type: application
     platform: iOS
     sources:
       - path: Sources
+      - path: Shared
+      - path: Assets.xcassets
     dependencies:
       - package: Sundial
         product: SundialCore
+      - target: SundialLiveActivity
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.sanchit.sundial.mobile
@@ -23,13 +36,52 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGNING_ALLOWED: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: SundialMobile.entitlements
+      properties:
+        aps-environment: $(APS_ENVIRONMENT)
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: Sundial
+        NSSupportsLiveActivities: true
+        SundialPushEnvironment: $(APS_ENVIRONMENT)
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.sanchit.sundial.mobile.refresh
+        UIBackgroundModes:
+          - fetch
+          - remote-notification
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.sanchit.sundial.mobile
+            CFBundleURLSchemes:
+              - sundial
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+  SundialLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: LiveActivity
+      - path: Shared
+    dependencies:
+      - package: Sundial
+        product: SundialCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.sanchit.sundial.mobile.liveactivity
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    info:
+      path: LiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Sundial Live Activity
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

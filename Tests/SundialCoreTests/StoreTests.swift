@@ -80,8 +80,12 @@ final class StoreTests: XCTestCase {
 
         var s = Settings.default
         s.idleThreshold = 42
+        s.dailyWorkTarget = 7.5 * 3600
+        s.smartWorkTargetEnabled = true
+        s.weeklyWorkTarget = 35 * 3600
+        s.includeWeekendsInWorkTarget = true
         store.save(s)
-        XCTAssertEqual(store.loadSettings().idleThreshold, 42)
+        XCTAssertEqual(store.loadSettings(), s)
     }
 
     func testCrashRecoveryCommitsTheOpenSpan() {

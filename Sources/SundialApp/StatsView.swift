@@ -38,6 +38,7 @@ struct StatsView: View {
         .onAppear(perform: reload)
         .onChange(of: period) { _, _ in reload() }
         .onChange(of: engine.day) { _, _ in reload() }
+        .onChange(of: engine.outOfOffice) { _, _ in reload() }
     }
 
     private var header: some View {
@@ -70,7 +71,8 @@ struct StatsView: View {
     // MARK: - Panels
 
     private func summary(_ s: RangeStats) -> some View {
-        let weekly = s.weeklyWorkStats(period: period, now: requestedAt)
+        let weekly = s.weeklyWorkStats(period: period, now: requestedAt,
+                                       includeWeekends: engine.settings.includeWeekendsInWorkTarget)
         return Card(padding: 16) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 16) {
@@ -89,6 +91,9 @@ struct StatsView: View {
                                    + (weekly.completedWeeks == 1 ? "" : "s")
                                    + " · current week excluded")
                                 .font(.system(size: 10)).foregroundStyle(.secondary)
+                            if let note = timeOffNote(weekly) {
+                                Text(note).font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     Spacer(minLength: 0)
@@ -132,6 +137,22 @@ struct StatsView: View {
         }
     }
 
+    /// Weeks with time off are in the average, counted by the days worked.
+    private func timeOffNote(_ weekly: WeeklyWorkStats) -> String? {
+        var parts: [String] = []
+        if weekly.weeksWithTimeOff > 0 {
+            let days = weekly.outOfOfficeDays, weeks = weekly.weeksWithTimeOff
+            parts.append("\(days) day\(days == 1 ? "" : "s") off across \(weeks) week"
+                         + "\(weeks == 1 ? "" : "s"), so these weeks count as "
+                         + String(format: "%.1f", weekly.effectiveWeeks) + " weeks of work")
+        }
+        if weekly.weeksEntirelyOff > 0 {
+            let n = weekly.weeksEntirelyOff
+            parts.append("\(n) week\(n == 1 ? "" : "s") entirely off, not counted")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private func stat(_ label: String, _ value: String, sub: String? = nil,
                       tint: Color = .primary) -> some View {
         StatTile(value: value, label: label, detail: sub, tint: tint, compact: true)
@@ -144,7 +165,9 @@ struct StatsView: View {
             Chart(s.days) { d in
                 BarMark(x: .value("Day", d.day),
                         y: .value("Hours", d.totals.work / 3600))
-                    .foregroundStyle(d.day == s.today
+                    .foregroundStyle(s.isOutOfOffice(d)
+                                     ? Color.secondary.opacity(0.45)
+                                     : d.day == s.today
                                      ? Theme.work.opacity(0.3)
                                      : (d.isWeekend
                                         ? Theme.work.opacity(0.5)
@@ -166,6 +189,8 @@ struct StatsView: View {
             .chartYAxisLabel("hours")
             .frame(height: 150)
             Text("Weekends are paler, and today is paler still because it is not finished. "
+                 + (s.days.contains(where: s.isOutOfOffice)
+                    ? "Grey days were out of office. " : "")
                  + "The dashed line is the average of complete days.")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }

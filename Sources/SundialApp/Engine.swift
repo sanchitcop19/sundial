@@ -17,10 +17,48 @@ final class Engine: ObservableObject {
     @Published private(set) var currentSnapshot: Snapshot?
     @Published private(set) var currentState: TimeCategory = .away
     @Published private(set) var currentReason: String = "Starting up"
+    @Published private(set) var workTarget = WorkTarget.compute(
+        settings: .default, previousDays: [], workedToday: 0, now: Date())
+    @Published private(set) var isWorkTargetLoading = true
 
     // Configuration
-    @Published var rules: RuleSet { didSet { store.save(rules); reclassify(); scheduleRebuild() } }
-    @Published var settings: Settings { didSet { store.save(settings); reclassify() } }
+    /// Whole days away from work. They have no target and are left out of averages.
+    @Published private(set) var outOfOffice: OutOfOffice {
+        didSet {
+            guard outOfOffice != oldValue else { return }
+            store.save(outOfOffice)
+            statsCache = [:]
+            updateWorkTarget()
+        }
+    }
+    @Published var rules: RuleSet {
+        didSet {
+            store.save(rules)
+            reclassify()
+            reloadWorkTargetHistory()
+            scheduleRebuild()
+        }
+    }
+    @Published var settings: Settings {
+        didSet {
+            store.save(settings)
+            var previous = oldValue
+            previous.menuBarTimeDisplay = settings.menuBarTimeDisplay
+            // Changing the menu bar does not affect tracking or break reminders.
+            if previous == settings { return }
+            // A target edit only changes the display; keep any active break intact.
+            previous.dailyWorkTarget = settings.dailyWorkTarget
+            previous.smartWorkTargetEnabled = settings.smartWorkTargetEnabled
+            previous.weeklyWorkTarget = settings.weeklyWorkTarget
+            previous.includeWeekendsInWorkTarget = settings.includeWeekendsInWorkTarget
+            if previous != settings {
+                reclassify()
+                reloadWorkTargetHistory()
+            } else {
+                updateWorkTarget()
+            }
+        }
+    }
 
     // Status
     @Published private(set) var isPaused = false
@@ -40,12 +78,14 @@ final class Engine: ObservableObject {
 
     let store: Store
     let browsers = BrowserReader()
+    let phoneSync = PhoneSync()
     private var data: DayData
     private var open: ObservationSpan?
     private var timer: Timer?
     private var lastTick: Date?
     private var lastPresenceSave = Date.distantPast
     private var lastBackupAt = Date.distantPast
+    private var lastInboxDrain = Date.distantPast
     private var lastDailyWrite = Date.distantPast
     private var undoStack: [(RuleSet, String)] = []
     private var projectIndex: [String: String] = [:]
@@ -58,7 +98,10 @@ final class Engine: ObservableObject {
     private var followUpWork: DispatchWorkItem?
     private var activationObserver: NSObjectProtocol?
     private var breakReminderState: BreakReminderState
+    private var breakStatusUpdatedAt = Date()
     private var breakCompletion = BreakCompletionTracker()
+    private var previousWorkDays: [DailySummary]?
+    private var workTargetRequest = UUID()
     private let reminders = Reminders()
     private let breakPanel = BreakPanel()
 
@@ -71,6 +114,7 @@ final class Engine: ObservableObject {
         // particular must exist before recovery touches it.
         rules = loaded ?? RuleSet()
         settings = store.loadSettings()
+        outOfOffice = store.loadOutOfOffice()
         isSetUp = loaded != nil
         day = today
         data = store.load(day: today)
@@ -78,15 +122,18 @@ final class Engine: ObservableObject {
         if let recovered = store.recoverOpen() { data.observations.append(recovered) }
         noteOfflineSinceLastRun()
         reclassify()
+        reloadWorkTargetHistory()
     }
 
     // MARK: - Lifecycle
 
     func start() {
         needsAccessibility = !Signals.accessibilityGranted
+        reminders.onStart = { [weak self] in self?.startBreak() }
         reminders.onSnooze = { [weak self] in self?.snoozeBreak() }
         reminders.onSkip = { [weak self] in self?.skipBreak() }
         reminders.onBreakDueDelivered = { [weak self] in self?.recordBreakReminder(at: Date()) }
+        breakPanel.onStart = { [weak self] in self?.startBreak() }
         breakPanel.onSnooze = { [weak self] in self?.snoozeBreak() }
         breakPanel.onSkip = { [weak self] in self?.skipBreak() }
         // A refused notification must not mean a silent feature: the app shows
@@ -171,8 +218,12 @@ final class Engine: ObservableObject {
 
     private func tick() {
         rolloverIfNeeded()
-        guard !isPaused else { return }
         let now = Date()
+        guard !isPaused else {
+            completeBreakIfNeeded(now: now)
+            synchronizePhone()
+            return
+        }
 
         if let last = lastTick, now.timeIntervalSince(last) > settings.maxSampleGap {
             closeOpenSpan(at: last)
@@ -212,6 +263,7 @@ final class Engine: ObservableObject {
         store.saveOpen(open)
         reclassify(preservingBreakProgress: true)
         updateBreakReminders(now: now)
+        maybeDrainInbox()
         maybeBackup()
     }
 
@@ -244,6 +296,7 @@ final class Engine: ObservableObject {
         day = today
         data = store.load(day: today)
         reclassify()
+        reloadWorkTargetHistory()
     }
 
     // MARK: - Observation
@@ -357,9 +410,29 @@ final class Engine: ObservableObject {
 
     // MARK: - Classification
 
+    var breakCountdownText: String? {
+        guard settings.breakReminders, settings.workBeforeBreak > 0 else { return nil }
+        guard !isPaused || breakStatus.breakEndsAt != nil else { return "Break timer paused" }
+        let elapsed = Date().timeIntervalSince(breakStatusUpdatedAt)
+        let projected = breakStatus.breakEndsAt == nil ? min(settings.maxSampleGap, elapsed) : elapsed
+        return breakStatus.countdownText(after: projected, currentState: currentState)
+    }
+
     /// Recomputes every segment for the day from raw observations.
     func reclassify(preservingBreakProgress: Bool = false) {
-        if !preservingBreakProgress { resetBreakNotifications() }
+        if !preservingBreakProgress {
+            // Reclassifying history cannot create a break, and must not erase
+            // observation of a timer the user already started.
+            if breakReminderState.activeBreak == nil { breakCompletion.reset() }
+            reminders.cancel()
+            breakPanel.close()
+        }
+        if !settings.breakReminders || settings.workBeforeBreak <= 0 || settings.breakLength <= 0 {
+            if breakReminderState.activeBreak != nil {
+                breakReminderState.cancelBreak()
+                store.save(breakReminderState)
+            }
+        }
         var obs = data.observations
         if let o = open, o.duration > 0 { obs.append(o) }
         let classifier = Classifier(rules: rules, settings: settings)
@@ -371,14 +444,32 @@ final class Engine: ObservableObject {
             currentState = last.state
             currentReason = last.reason
         }
+        breakStatusUpdatedAt = Date()
         breakStatus = Breaks.status(segments: breakReminderState.segmentsSinceSkip(segments),
-                                    now: Date(), settings: settings,
+                                    now: breakStatusUpdatedAt, settings: settings,
                                     snoozedUntil: breakReminderState.quietUntil, inCall: inCall,
-                                    currentState: currentState)
+                                    currentState: currentState, activeBreak: breakReminderState.activeBreak)
+        updateWorkTarget()
+    }
+
+    /// Only an explicit choice starts the countdown; activity classification
+    /// continues to record actual work independently of this timer.
+    func startBreak() {
+        guard settings.breakReminders, settings.workBeforeBreak > 0,
+              settings.breakLength > 0, !isPaused, breakReminderState.activeBreak == nil else { return }
+        let now = Date()
+        breakReminderState.start(at: now, length: settings.breakLength)
+        store.save(breakReminderState)
+        resetBreakNotifications()
+        _ = breakCompletion.update(activeBreak: breakReminderState.activeBreak, now: now,
+                                   settings: settings, inCall: inCall)
+        reclassify(preservingBreakProgress: true)
     }
 
     /// Quiet for a while. The break stays owed, so the menu bar keeps saying so.
     func snoozeBreak() {
+        guard settings.breakReminders, !isPaused, breakStatus.owed,
+              breakReminderState.activeBreak == nil else { return }
         breakReminderState.snooze(at: Date())
         store.save(breakReminderState)
         reminders.cancelBreakDue()
@@ -387,7 +478,8 @@ final class Engine: ObservableObject {
     }
 
     func skipBreak() {
-        guard breakStatus.owed else { return }
+        guard settings.breakReminders, !isPaused, breakStatus.owed,
+              breakReminderState.activeBreak == nil else { return }
         breakReminderState.skip(at: Date())
         store.save(breakReminderState)
         resetBreakNotifications()
@@ -406,17 +498,26 @@ final class Engine: ObservableObject {
         breakPanel.close()
     }
 
+    @discardableResult
+    private func completeBreakIfNeeded(now: Date) -> Bool {
+        let notify = breakCompletion.update(activeBreak: breakReminderState.activeBreak, now: now,
+                                            settings: settings, inCall: inCall || isPaused)
+        guard let completed = breakReminderState.finishBreak(at: now) else { return false }
+        // Persist consumption before notifying, including silent expiry after
+        // relaunch or sleep, so an old break cannot announce itself again.
+        store.save(breakReminderState)
+        reminders.cancel()
+        breakPanel.close()
+        reclassify(preservingBreakProgress: true)
+        if notify { reminders.breakOver(length: completed.duration) }
+        return true
+    }
+
     /// Said once when a break falls due, then at most every twenty minutes while
     /// it is still owed: a reminder that repeats every tick is an alarm.
     private func updateBreakReminders(now: Date) {
-        let reminderSegments = breakReminderState.segmentsSinceSkip(segments)
-        if breakCompletion.update(segments: reminderSegments, now: now, settings: settings, inCall: inCall) {
-            breakReminderState.clearSnooze()
-            store.save(breakReminderState)
-            breakPanel.close()
-            reminders.breakOver(length: settings.breakLength)
-            return
-        }
+        if completeBreakIfNeeded(now: now) { return }
+        guard breakReminderState.activeBreak == nil else { return }
         if !breakStatus.owed {
             if reminders.cancelBreakDue() { breakPanel.close() }
             return
@@ -464,6 +565,7 @@ final class Engine: ObservableObject {
     private func write(_ entries: [ManualEntry], day: String) {
         store.saveManual(entries, day: day)
         if day == self.day { data.manual = entries; reclassify() }
+        else { reloadWorkTargetHistory() }
         // Any day can be edited, so the rollup for every day is redone.
         scheduleRebuild()
     }
@@ -557,6 +659,114 @@ final class Engine: ObservableObject {
         }
     }
 
+    // MARK: - Work targets
+
+    private func updateWorkTarget() {
+        var targetSettings = settings
+        // Use the ordinary daily target until the current week's history is ready.
+        if previousWorkDays == nil { targetSettings.smartWorkTargetEnabled = false }
+        let result = WorkTarget.compute(settings: targetSettings,
+                                        previousDays: previousWorkDays ?? [],
+                                        workedToday: totals.work, now: Date(),
+                                        outOfOffice: outOfOffice)
+        if result != workTarget { workTarget = result }
+        synchronizePhone()
+    }
+
+    private func synchronizePhone() {
+        guard day == Format.day(Date()), !(settings.smartWorkTargetEnabled && isWorkTargetLoading) else { return }
+        var snapshot = WorkProgressSnapshot(
+            day: day, timeZoneIdentifier: TimeZone.current.identifier,
+            updatedAt: Date().timeIntervalSince1970, worked: totals.work, target: workTarget.dailyTarget,
+            weeklyWorked: settings.smartWorkTargetEnabled ? workTarget.weeklyWorked : nil,
+            weeklyTarget: settings.smartWorkTargetEnabled ? workTarget.weeklyTarget : nil,
+            state: currentState.rawValue, isPaused: isPaused)
+        snapshot.updateBreak(breakStatus)
+        phoneSync.update(snapshot, destinations: settings.backupTo)
+    }
+
+    /// At most six completed days are classified, off the main thread. Live
+    /// ticks reuse this cache; only history or classification changes invalidate it.
+    private func reloadWorkTargetHistory() {
+        let requestedDay = day
+        let request = UUID()
+        workTargetRequest = request
+        previousWorkDays = nil
+        isWorkTargetLoading = true
+        updateWorkTarget()
+        let dayStart = StatsPeriod.calendar.startOfDay(for: Date())
+        loadStats(period: .week, now: dayStart) { [weak self] stats in
+            guard let self, self.workTargetRequest == request,
+                  self.day == requestedDay, Format.day(Date()) == requestedDay else { return }
+            self.previousWorkDays = stats.days.filter { $0.day < requestedDay }.map {
+                DailySummary(date: $0.day, work: $0.work)
+            }
+            self.isWorkTargetLoading = false
+            self.updateWorkTarget()
+        }
+    }
+
+    var isOutOfOfficeToday: Bool { outOfOffice.contains(Date()) }
+
+    func markOutOfOffice(_ away: Bool, from first: Date, through last: Date) {
+        var updated = outOfOffice
+        if away {
+            updated.add(from: first, through: last, calendar: StatsPeriod.calendar)
+        } else {
+            updated.remove(from: first, through: last, calendar: StatsPeriod.calendar)
+        }
+        outOfOffice = updated
+    }
+
+    func removeOutOfOffice(_ run: OutOfOffice.Run) {
+        var updated = outOfOffice
+        updated.remove(days: run.days)
+        outOfOffice = updated
+    }
+
+    func toggleOutOfOfficeToday() {
+        let today = Date()
+        markOutOfOffice(!isOutOfOfficeToday, from: today, through: today)
+    }
+
+    var workTargetLabel: String {
+        if workTarget.isOutOfOffice { return "Out of office" }
+        if workTarget.isRestDay { return "Rest day" }
+        let kind = settings.smartWorkTargetEnabled && !isWorkTargetLoading ? "adjusted" : "daily"
+        return "\(Format.hoursMinutes(workTarget.dailyTarget, roundingUp: true)) \(kind) target"
+    }
+
+    var workTargetWeekSummary: String? {
+        guard settings.smartWorkTargetEnabled else { return nil }
+        guard !isWorkTargetLoading else { return "Updating this week’s work…" }
+        return "\(Format.duration(workTarget.weeklyWorked)) of \(Format.duration(workTarget.weeklyTarget)) this week"
+            + " · \(Format.hoursMinutes(workTarget.weeklyRemaining, roundingUp: true)) left"
+    }
+
+    var workTargetNote: String? {
+        guard settings.smartWorkTargetEnabled, !isWorkTargetLoading else { return nil }
+        if workTarget.isOutOfOffice {
+            return "Work you do today still counts toward this week."
+        }
+        if workTarget.weeklyTarget <= 0 {
+            return "Every planned day this week is out of office, so there is no weekly target."
+        }
+        if workTarget.isRestDay {
+            return workTarget.weeklyRemaining > 0
+                ? "No planned days left this week. Weekend work still counts toward the weekly target."
+                : "Rest day. The weekly target is complete."
+        }
+        if workTarget.isCapped && workTarget.weeklyRemaining > 0 {
+            return "The weekly target needs \(Format.hoursMinutes(workTarget.requiredDailyPace, roundingUp: true)) per planned day; "
+                + "today’s target stays at \(Format.hoursMinutes(workTarget.dailyTarget, roundingUp: true))."
+        }
+        if workTarget.plannedDaysAway > 0 {
+            let days = workTarget.plannedDaysAway
+            return "The weekly target is reduced for \(days) day\(days == 1 ? "" : "s") out of office."
+        }
+        return nil
+    }
+
     // MARK: - Export
 
     func writeDaily() {
@@ -576,6 +786,7 @@ final class Engine: ObservableObject {
 
     func rebuildAllDays() {
         writeDaily()
+        reloadWorkTargetHistory()
         let r = rules, s = settings
         let root = store.root
         DispatchQueue.global(qos: .utility).async {
@@ -596,8 +807,24 @@ final class Engine: ObservableObject {
         if !result.destinations.isEmpty { lastBackup = Date() }
     }
 
-    /// Picks up rules and sessions sent from the phone. Runs on the backup
-    /// cadence, since the same folder is being visited anyway.
+    /// The phone reports an entry as waiting until the Mac takes it, and as
+    /// failed if that takes too long, so this interval is the one the phone
+    /// quotes. Anything applied is mirrored at once: the phone stops counting
+    /// the inbox file as soon as it is gone, and the mirror must already
+    /// include it.
+    private func maybeDrainInbox() {
+        guard !settings.backupTo.isEmpty,
+              Date().timeIntervalSince(lastInboxDrain) >= PhoneDeliveries.macCheckInterval
+        else { return }
+        lastInboxDrain = Date()
+        let r = drainInbox()
+        guard r.rulesAdded > 0 || r.sessionsAdded > 0 else { return }
+        backupNow()
+        lastBackupAt = Date()
+    }
+
+    /// Picks up rules and sessions sent from the phone. Also runs with every
+    /// backup, since the same folder is being visited anyway.
     @discardableResult
     func drainInbox() -> Inbox.Result {
         var total = Inbox.Result()
@@ -613,7 +840,10 @@ final class Engine: ObservableObject {
             total.sessionSeconds += r.sessionSeconds
             total.failed += r.failed
         }
-        if total.rulesAdded > 0 || total.sessionsAdded > 0 { reclassify() }
+        if total.rulesAdded > 0 || total.sessionsAdded > 0 {
+            reclassify()
+            reloadWorkTargetHistory()
+        }
         return total
     }
 

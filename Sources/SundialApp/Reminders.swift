@@ -35,11 +35,14 @@ enum BreakReminder {
 @MainActor
 final class Reminders: NSObject, UNUserNotificationCenterDelegate {
     nonisolated static let category = "break"
+    nonisolated static let startAction = "start"
     nonisolated static let snoozeAction = "snooze"
     nonisolated static let skipAction = "skip"
     nonisolated private static let requestKey = "breakRequestID"
     private static let identifier = "break"
 
+    /// Called only when someone explicitly chooses to start their break.
+    var onStart: (() -> Void)?
     /// Called when someone chooses Snooze on the notification.
     var onSnooze: (() -> Void)?
     /// Called when someone chooses to skip the currently owed break.
@@ -62,6 +65,8 @@ final class Reminders: NSObject, UNUserNotificationCenterDelegate {
             UNNotificationCategory(
                 identifier: Self.category,
                 actions: [
+                    UNNotificationAction(identifier: Self.startAction,
+                                         title: "Start break", options: []),
                     UNNotificationAction(identifier: Self.snoozeAction,
                                          title: "Snooze \(Int(Breaks.snooze / 60)) min",
                                          options: []),
@@ -174,6 +179,7 @@ final class Reminders: NSObject, UNUserNotificationCenterDelegate {
             if let self, id == self.requestID.uuidString,
                self.currentReminder?.canSnooze == true {
                 switch action {
+                case Self.startAction: self.onStart?()
                 case Self.snoozeAction: self.onSnooze?()
                 case Self.skipAction: self.onSkip?()
                 default: break

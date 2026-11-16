@@ -2,6 +2,31 @@ import Foundation
 import Combine
 import SundialCore
 
+enum DurationSendStatus: Equatable {
+    case queued(String)
+    case sent(String)
+    case failed(String)
+
+    var message: String {
+        switch self {
+        case .queued(let message), .sent(let message), .failed(let message): return message
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .queued: return "clock.fill"
+        case .sent: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var isFailure: Bool {
+        if case .failed = self { return true }
+        return false
+    }
+}
+
 /// Reads the record the Mac mirrors to cloud storage, and posts changes back.
 ///
 /// iOS cannot see which app is in front - there is no API for it, and Screen
@@ -23,21 +48,38 @@ final class Library: ObservableObject {
     @Published private(set) var status: String?
     @Published private(set) var hasDetail = false
     @Published private(set) var pendingCount = 0
-    @Published var activeSession: ManualSession?
+    @Published private(set) var progress: WorkProgressSnapshot?
+    @Published private(set) var progressStatus: String?
+    @Published private(set) var durationStatus: DurationSendStatus?
+    @Published private(set) var timer: PhoneTimer?
+
+    let liveActivity = LiveActivityController()
 
     private let bookmarkKey = "sundial.folder.bookmark"
-    private let sessionKey = "sundial.session.active"
-
-    struct ManualSession: Codable, Equatable {
-        var start: Date
-        var label: String
-        var outcome: Outcome
-    }
+    private let deliveriesKey = "sundial.pending.deliveries"
+    private let timerKey = "sundial.phone.timer"
+    /// Persisted, so a send is still tracked if the app is closed before the
+    /// Mac picks it up.
+    private var deliveries: [PhoneDelivery] = []
 
     init() {
         restoreFolder()
-        if let d = UserDefaults.standard.data(forKey: sessionKey) {
-            activeSession = try? JSONDecoder().decode(ManualSession.self, from: d)
+        timer = UserDefaults.standard.data(forKey: timerKey)
+            .flatMap { try? JSONDecoder().decode(PhoneTimer.self, from: $0) }
+        deliveries = UserDefaults.standard.data(forKey: deliveriesKey)
+            .flatMap { try? JSONDecoder().decode([PhoneDelivery].self, from: $0) } ?? []
+        #if DEBUG
+        // An isolated folder lets simulator checks exercise the real sync reader.
+        if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--sundial-sync-folder"),
+           ProcessInfo.processInfo.arguments.indices.contains(index + 1) {
+            folder = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[index + 1], isDirectory: true)
+        }
+        #endif
+        // Push-to-start wakes the app without opening a view. Restore the sync
+        // connection here so that activity and device tokens reach the Mac.
+        if let folder {
+            liveActivity.connect(to: folder)
+            refreshProgress()
         }
     }
 
@@ -56,19 +98,32 @@ final class Library: ObservableObject {
             status = "Could not open that folder."
             return
         }
+        defer { url.stopAccessingSecurityScopedResource() }
+        if folder != url {
+            liveActivity.disconnect()
+            progress = nil
+            segments = []; totals = Totals(); reviewItems = []; daily = []
+            hasDetail = false; pendingCount = 0
+            durationStatus = nil; setDeliveries([])
+        }
         if let data = try? url.bookmarkData(options: .minimalBookmark,
                                             includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
         folder = url
+        liveActivity.connect(to: url)
         refresh()
     }
 
     func disconnect() {
+        liveActivity.disconnect()
         folder?.stopAccessingSecurityScopedResource()
         UserDefaults.standard.removeObject(forKey: bookmarkKey)
         folder = nil
         segments = []; totals = Totals(); reviewItems = []; daily = []
+        progress = nil; progressStatus = nil; status = nil; hasDetail = false
+        pendingCount = 0; durationStatus = nil
+        setDeliveries([])
     }
 
     // MARK: - Reading
@@ -79,6 +134,8 @@ final class Library: ObservableObject {
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
 
         let fm = FileManager.default
+        readProgress(in: folder)
+        refreshDeliveryState()
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .custom { decoder in
             let text = try decoder.singleValueContainer().decode(String.self)
@@ -112,9 +169,14 @@ final class Library: ObservableObject {
             hasDetail = false
             segments = []; reviewItems = []
             totals = Totals()
-            status = daily.isEmpty
+            if let summary = daily.last {
+                day = summary.date
+                totals.byState = [.work: summary.work, .personal: summary.personal,
+                                  .away: summary.away, .unclassified: summary.unclassified]
+            }
+            status = daily.isEmpty && progress == nil
                 ? "No record found in that folder."
-                : "Daily totals only. Turn on “Include the raw record” in the Mac app to review here."
+                : "Turn on “Include the raw record” on your Mac to review individual activities here."
             return
         }
         hasDetail = true
@@ -146,7 +208,77 @@ final class Library: ObservableObject {
             .classify(observations: observations, presence: presence)
         totals = Totals.compute(segments)
         reviewItems = ReviewItem.build(from: segments)
-        pendingCount = (try? fm.contentsOfDirectory(atPath: inbox().path).count) ?? 0
+    }
+
+    private func readProgress(in folder: URL) {
+        let file = folder.appendingPathComponent("work-progress.json")
+        try? FileManager.default.startDownloadingUbiquitousItem(at: file)
+        var coordinationError: NSError?
+        var readError: Error?
+        var snapshot: WorkProgressSnapshot?
+        NSFileCoordinator().coordinate(readingItemAt: file, options: [], error: &coordinationError) { url in
+            do {
+                snapshot = try JSONDecoder().decode(WorkProgressSnapshot.self,
+                                                     from: Data(contentsOf: url))
+            } catch { readError = error }
+        }
+        if let snapshot, snapshot.isValid {
+            if progress.map({ snapshot.updatedAt >= $0.updatedAt }) ?? true {
+                progress = snapshot
+            }
+            progressStatus = nil
+        } else {
+            progressStatus = "Waiting for your Mac’s progress. Enable Sync work progress to iPhone in Sundial on your Mac and choose this same shared folder."
+            if coordinationError != nil || readError != nil, progress != nil {
+                progressStatus = "Could not refresh from the shared folder. Showing the last update from your Mac."
+            }
+        }
+        let current = progress
+        Task { await liveActivity.receive(current, folder: folder) }
+    }
+
+    func refreshProgress() {
+        guard let folder else { return }
+        let scoped = folder.startAccessingSecurityScopedResource()
+        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+        readProgress(in: folder)
+        refreshDeliveryState()
+    }
+
+    private func refreshDeliveryState() {
+        guard let folder else { return }
+        let directory = folder.appendingPathComponent("inbox")
+        // An unreadable inbox says nothing about delivery: reporting "added"
+        // from a failed listing would be a false confirmation.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return }
+        pendingCount = names.count
+        guard !deliveries.isEmpty else { return }
+
+        let result = PhoneDeliveries.resolve(deliveries, present: Set(names))
+        if result.remaining != deliveries { setDeliveries(result.remaining) }
+        let status: DurationSendStatus?
+        switch result.state {
+        case .waiting(let message): status = .queued(message)
+        case .delivered(let message): status = .sent(message)
+        case .stalled(let message): status = .failed(message)
+        case nil: status = nil
+        }
+        if let status, status != durationStatus { durationStatus = status }
+    }
+
+    private func setDeliveries(_ new: [PhoneDelivery]) {
+        deliveries = new
+        if new.isEmpty {
+            UserDefaults.standard.removeObject(forKey: deliveriesKey)
+        } else if let data = try? JSONEncoder().encode(new) {
+            UserDefaults.standard.set(data, forKey: deliveriesKey)
+        }
+    }
+
+    func refreshInBackground() async {
+        refreshProgress()
+        if let folder { await liveActivity.receive(progress, folder: folder) }
     }
 
     // MARK: - Writing back
@@ -161,9 +293,9 @@ final class Library: ObservableObject {
     private var encoder: JSONEncoder {
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         e.dateEncodingStrategy = .custom { date, enc in
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             var c = enc.singleValueContainer()
             try c.encode(f.string(from: date))
         }
@@ -184,43 +316,111 @@ final class Library: ObservableObject {
         refresh()
     }
 
-    func startSession(label: String, outcome: Outcome) {
-        activeSession = ManualSession(start: Date(), label: label, outcome: outcome)
-        persistSession()
-    }
-
-    func stopSession() {
-        guard let s = activeSession, let folder else { return }
-        activeSession = nil
-        persistSession()
-        guard Date().timeIntervalSince(s.start) >= 5 else { return }
+    /// Queues phone time as a completed stretch ending now. The Mac already
+    /// understands this inbox format, so duration entry does not need its own
+    /// sync protocol or any timer state on the phone.
+    @discardableResult
+    func sendDuration(label: String, outcome: Outcome, duration: TimeInterval,
+                      endingAt end: Date = Date()) -> Bool {
+        let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let folder else {
+            durationStatus = .failed("Connect to your Mac before sending time.")
+            return false
+        }
+        guard !label.isEmpty else {
+            durationStatus = .failed("Add a label before sending time.")
+            return false
+        }
+        guard duration >= 60, duration <= Manual.maxLength else {
+            durationStatus = .failed("Choose a duration between 1 minute and 24 hours.")
+            return false
+        }
 
         let scoped = folder.startAccessingSecurityScopedResource()
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
         let span = ObservationSpan(
-            start: s.start, end: Date(),
+            start: end.addingTimeInterval(-duration), end: end,
             snapshot: Snapshot(bundleId: MobileSession.bundleId, appName: "Phone",
-                               windowTitle: s.label, workspace: s.label))
-        if let d = try? encoder.encode(span) {
-            try? d.write(to: inbox().appendingPathComponent("session-\(UUID().uuidString).json"),
-                         options: .atomic)
+                               windowTitle: label, workspace: label))
+        let fileName = "session-\(UUID().uuidString).json"
+        let destination = inbox().appendingPathComponent(fileName)
+        do {
+            try encoder.encode(span).write(to: destination, options: .atomic)
+        } catch {
+            durationStatus = .failed("Could not push time to the shared folder: \(error.localizedDescription)")
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: destination.path) else {
+            durationStatus = .failed("The shared folder did not keep the time. Try again.")
+            return false
         }
         // Make sure the label has a rule, so phone time is not left unclassified.
         if rules.match(span.snapshot) == nil {
-            add(Rule(name: "Phone: \(s.label)",
+            add(Rule(name: "Phone: \(label)",
                      conditions: [Condition(.bundleId, .equals, MobileSession.bundleId),
-                                  Condition(.workspace, .equals, s.label)],
-                     outcome: s.outcome, origin: .manual))
+                                  Condition(.workspace, .equals, label)],
+                     outcome: outcome, origin: .manual))
         } else {
             refresh()
         }
+        setDeliveries(deliveries + [PhoneDelivery(
+            fileName: fileName,
+            description: "\(Format.duration(duration)) of \(outcome.label.lowercased())",
+            queuedAt: Date())])
+        refreshDeliveryState()
+        return true
     }
 
-    private func persistSession() {
-        if let s = activeSession, let d = try? JSONEncoder().encode(s) {
-            UserDefaults.standard.set(d, forKey: sessionKey)
+    // MARK: - Timer
+
+    /// Starts counting phone time. Nothing is sent until it is stopped, so the
+    /// Mac only ever receives a finished stretch, the same as a typed duration.
+    func startTimer(label: String, outcome: Outcome) {
+        let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard folder != nil else {
+            durationStatus = .failed("Connect to your Mac before starting a timer.")
+            return
+        }
+        guard !label.isEmpty else {
+            durationStatus = .failed("Add a label before starting a timer.")
+            return
+        }
+        guard timer == nil else { return }
+        setTimer(PhoneTimer(start: Date(), label: label, outcome: outcome))
+        durationStatus = nil
+    }
+
+    /// Stops the timer and sends what it measured. If sending fails the timer
+    /// keeps running, so the time can be sent again rather than lost.
+    func stopTimer() {
+        guard let running = timer else { return }
+        let now = Date()
+        switch running.finish(at: now) {
+        case .send(let duration):
+            if sendDuration(label: running.label, outcome: running.outcome,
+                            duration: duration, endingAt: now) {
+                setTimer(nil)
+            }
+        case .tooShort:
+            setTimer(nil)
+            durationStatus = .failed("The timer ran under a minute, so nothing was sent.")
+        case .tooLong:
+            setTimer(nil)
+            durationStatus = .failed("The timer ran over 24 hours, so nothing was sent. Add the time by hand.")
+        }
+    }
+
+    /// Throws the running timer away without sending anything.
+    func discardTimer() {
+        setTimer(nil)
+    }
+
+    private func setTimer(_ new: PhoneTimer?) {
+        timer = new
+        if let new, let data = try? JSONEncoder().encode(new) {
+            UserDefaults.standard.set(data, forKey: timerKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: sessionKey)
+            UserDefaults.standard.removeObject(forKey: timerKey)
         }
     }
 
@@ -232,9 +432,9 @@ final class Library: ObservableObject {
             return ([], [])
         }
         let dec = JSONDecoder()
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         dec.dateDecodingStrategy = .custom { d in
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let t = try d.singleValueContainer().decode(String.self)
             if let v = f.date(from: t) { return v }
             let plain = ISO8601DateFormatter(); plain.formatOptions = [.withInternetDateTime]
@@ -250,10 +450,4 @@ final class Library: ObservableObject {
         }
         return (obs, obs.map { Span($0.start, $0.end) })
     }
-}
-
-/// Time recorded on the phone is tagged with this instead of a real bundle id,
-/// so it is obvious in the record where it came from.
-enum MobileSession {
-    static let bundleId = "sundial.phone.session"
 }

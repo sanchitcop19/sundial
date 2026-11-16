@@ -201,6 +201,10 @@ public struct RuleSet: Codable, Sendable, Equatable {
     }
 }
 
+public enum MenuBarTimeDisplay: String, Codable, Sendable {
+    case worked, remaining, both
+}
+
 /// Thresholds and other knobs that affect classification but are not rules.
 public struct Settings: Codable, Sendable, Equatable {
     /// Silence after which nobody is considered present.
@@ -218,6 +222,13 @@ public struct Settings: Codable, Sendable, Equatable {
     /// setting here that costs battery: the menu bar is composited over the
     /// wallpaper, so every beat repaints a blurred strip.
     public var beatPeriod: TimeInterval
+    public var menuBarTimeDisplay: MenuBarTimeDisplay
+
+    /// How much classified work to aim for each day.
+    public var dailyWorkTarget: TimeInterval
+    public var smartWorkTargetEnabled: Bool
+    public var weeklyWorkTarget: TimeInterval
+    public var includeWeekendsInWorkTarget: Bool
 
     /// Say something after a long enough unbroken run of work.
     public var breakReminders: Bool
@@ -249,13 +260,27 @@ public struct Settings: Codable, Sendable, Equatable {
                 minDisplaySegment: TimeInterval, beatPeriod: TimeInterval,
                 breakReminders: Bool, workBeforeBreak: TimeInterval,
                 breakLength: TimeInterval, backupTo: [String],
-                backupInterval: TimeInterval, backupObservations: Bool) {
+                backupInterval: TimeInterval, backupObservations: Bool,
+                dailyWorkTarget: TimeInterval = 8 * 3600,
+                smartWorkTargetEnabled: Bool = false,
+                weeklyWorkTarget: TimeInterval = 40 * 3600,
+                includeWeekendsInWorkTarget: Bool = false,
+                menuBarTimeDisplay: MenuBarTimeDisplay = .both) {
         self.idleThreshold = idleThreshold; self.callIdleThreshold = callIdleThreshold
         self.maxSampleGap = maxSampleGap; self.sampleInterval = sampleInterval
         self.minDisplaySegment = minDisplaySegment; self.beatPeriod = beatPeriod
+        self.menuBarTimeDisplay = menuBarTimeDisplay
         self.breakReminders = breakReminders; self.workBeforeBreak = workBeforeBreak
         self.breakLength = breakLength; self.backupTo = backupTo
         self.backupInterval = backupInterval; self.backupObservations = backupObservations
+        self.dailyWorkTarget = dailyWorkTarget
+        self.smartWorkTargetEnabled = smartWorkTargetEnabled
+        self.weeklyWorkTarget = weeklyWorkTarget
+        self.includeWeekendsInWorkTarget = includeWeekendsInWorkTarget
+    }
+
+    public func workRemaining(after worked: TimeInterval) -> TimeInterval {
+        max(0, dailyWorkTarget - max(0, worked))
     }
 
     public init(from decoder: Decoder) throws {
@@ -272,6 +297,11 @@ public struct Settings: Codable, Sendable, Equatable {
         // Clamped: a hand-edited zero here would otherwise arm a timer with no
         // delay, and anything slower than a few seconds is not a beat at all.
         beatPeriod = min(max(v(.beatPeriod, d.beatPeriod), 0.3), 3)
+        menuBarTimeDisplay = v(.menuBarTimeDisplay, d.menuBarTimeDisplay)
+        dailyWorkTarget = min(max(v(.dailyWorkTarget, d.dailyWorkTarget), 15 * 60), 24 * 3600)
+        smartWorkTargetEnabled = v(.smartWorkTargetEnabled, d.smartWorkTargetEnabled)
+        weeklyWorkTarget = min(max(v(.weeklyWorkTarget, d.weeklyWorkTarget), 3600), 168 * 3600)
+        includeWeekendsInWorkTarget = v(.includeWeekendsInWorkTarget, d.includeWeekendsInWorkTarget)
         breakReminders = v(.breakReminders, d.breakReminders)
         // A zero here would make every moment of work overdue for a break.
         workBeforeBreak = max(v(.workBeforeBreak, d.workBeforeBreak), 60)

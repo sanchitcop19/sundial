@@ -7,6 +7,28 @@ struct TodayView: View {
     @State private var correcting: Snapshot?
     @State private var addingTime = false
 
+    private var displayGroups: [SegmentGroup] {
+        SegmentGroup.build(from: engine.displaySegments)
+    }
+
+    private var selectedGroup: SegmentGroup? {
+        guard let selection else { return nil }
+        return displayGroups.first { $0.segments.contains { $0.id == selection.id } }
+    }
+
+    private var isOverTarget: Bool {
+        engine.workTarget.dailyTarget > 0 && engine.totals.work > engine.workTarget.dailyTarget
+    }
+
+    private var targetBalance: String {
+        if engine.workTarget.dailyTarget <= 0 { return "No target today" }
+        if isOverTarget {
+            return "\(Format.duration(engine.totals.work - engine.workTarget.dailyTarget)) over target"
+        }
+        if engine.workTarget.remainingToday == 0 { return "Target reached" }
+        return "\(Format.hoursMinutes(engine.workTarget.remainingToday, roundingUp: true)) remaining"
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -35,18 +57,39 @@ struct TodayView: View {
                         SectionLabel("worked today")
                         Text(Format.duration(engine.totals.work))
                             .font(Theme.hero).monospacedDigit()
-                            .foregroundStyle(Theme.work)
+                            .foregroundStyle(isOverTarget ? Theme.overtime : Theme.work)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
                         Text(engine.day)
                             .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
                         Button("Add time…") { addingTime = true }.controlSize(.small)
+                        Button(engine.isOutOfOfficeToday ? "Back in office" : "Out of office") {
+                            engine.toggleOutOfOfficeToday()
+                        }
+                        .controlSize(.small)
+                        .help(engine.isOutOfOfficeToday
+                              ? "Give today a target again"
+                              : "No target today, and today stays out of averages")
                     }
                 }
-                if engine.breakStatus.owed {
-                    Label("Break due after \(Format.duration(engine.breakStatus.workedStraight)) of work",
-                          systemImage: "cup.and.saucer.fill")
+                HStack(alignment: .firstTextBaseline) {
+                    Text(targetBalance)
+                        .font(.system(size: 15, weight: .medium)).monospacedDigit()
+                        .foregroundStyle(isOverTarget ? Theme.overtime : .primary)
+                    Spacer()
+                    Text(engine.workTargetLabel)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                if let week = engine.workTargetWeekSummary {
+                    Text(week).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                if let note = engine.workTargetNote {
+                    Text(note).font(.system(size: 10))
+                        .foregroundStyle(engine.workTarget.isCapped ? Color.orange : Color.secondary)
+                }
+                if let countdown = engine.breakCountdownText {
+                    Label(countdown, systemImage: "cup.and.saucer.fill")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Theme.personal)
                 }
@@ -75,15 +118,17 @@ struct TodayView: View {
     }
 
     private var stretches: some View {
-        Card(title: "Today’s stretches") {
-            if engine.displaySegments.isEmpty {
+        let groups = displayGroups
+        let selectedID = selectedGroup?.id
+        return Card(title: "Today’s stretches") {
+            if groups.isEmpty {
                 Text("Nothing recorded yet. Keep working and this fills in.")
                     .font(Theme.body).foregroundStyle(.secondary)
             } else {
                 LazyVStack(spacing: 2) {
-                    ForEach(engine.displaySegments.reversed()) { seg in
-                        SegmentRow(segment: seg, selected: selection?.start == seg.start)
-                            .onTapGesture { selection = selection?.start == seg.start ? nil : seg }
+                    ForEach(groups.reversed()) { group in
+                        SegmentRow(group: group, selected: selectedID == group.id)
+                            .onTapGesture { selection = selectedID == group.id ? nil : group.first }
                     }
                 }
             }
@@ -91,12 +136,16 @@ struct TodayView: View {
     }
 
     private func inspector(for seg: Segment) -> some View {
-        Card {
+        let group = selectedGroup
+        let start = group?.start ?? seg.start
+        let end = group?.end ?? seg.end
+        let duration = group?.duration ?? seg.duration
+        return Card {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 8) {
                     Circle().fill(seg.state.gradient).frame(width: 11, height: 11)
                     Text(seg.state.label).font(Theme.title)
-                    Text("\(Format.clock(seg.start))–\(Format.clock(seg.end)) · \(Format.duration(seg.duration))")
+                    Text("\(Format.clock(start))–\(Format.clock(end)) · \(Format.duration(duration))")
                         .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
                     Spacer()
                     Button("Clear") { selection = nil }.controlSize(.small)
@@ -108,6 +157,10 @@ struct TodayView: View {
                     }
                 }
                 Text(seg.reason).font(.system(size: 11)).foregroundStyle(.secondary)
+                if let group, group.segments.count > 1 {
+                    Text("\(group.segments.count) stretches combined; brief switches between them are excluded from the duration.")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
                 if let snap = seg.snapshot {
                     HStack {
                         Button("This is wrong — fix it…") { correcting = snap }

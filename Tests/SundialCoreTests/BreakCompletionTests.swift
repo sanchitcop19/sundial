@@ -7,11 +7,16 @@ final class BreakCompletionTests: XCTestCase {
         var settings = Settings.default
         var now = Date(timeIntervalSince1970: 1_750_000_000)
         var segments: [Segment] = []
+        var activeBreak: Span?
 
         init(worked: TimeInterval = 1500) {
             settings.workBeforeBreak = 1500
             settings.breakLength = 300
             append(.work, seconds: worked)
+        }
+
+        mutating func startBreak() {
+            activeBreak = Span(now, now + settings.breakLength)
         }
 
         mutating func append(_ state: TimeCategory, seconds: TimeInterval) {
@@ -22,7 +27,7 @@ final class BreakCompletionTests: XCTestCase {
         }
 
         mutating func observe(inCall: Bool = false) -> Bool {
-            tracker.update(segments: segments, now: now, settings: settings, inCall: inCall)
+            tracker.update(activeBreak: activeBreak, now: now, settings: settings, inCall: inCall)
         }
 
         /// Keep the tracker live while advancing the timeline, including at
@@ -43,6 +48,7 @@ final class BreakCompletionTests: XCTestCase {
 
     func testCompletesAtTheExactBreakLength() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 299), 0)
         XCTAssertEqual(session.record(.away, seconds: 1), 1)
@@ -50,6 +56,7 @@ final class BreakCompletionTests: XCTestCase {
 
     func testConsecutiveNonworkCategoriesCombine() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.personal, seconds: 100), 0)
         XCTAssertEqual(session.record(.away, seconds: 100), 0)
@@ -58,6 +65,7 @@ final class BreakCompletionTests: XCTestCase {
 
     func testCompletionIsOnlyDeliveredOnceDuringAnExtendedBreak() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 1)
         XCTAssertFalse(session.observe(), "An unchanged sample must not repeat the alert")
@@ -65,24 +73,28 @@ final class BreakCompletionTests: XCTestCase {
         XCTAssertEqual(session.record(.personal, seconds: 300), 0)
     }
 
-    func testShortBreakInterruptedBySustainedWorkMustStartAgain() {
+    func testSustainedWorkDoesNotRestartAnExplicitBreak() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 200), 0)
         XCTAssertEqual(session.record(.work, seconds: Breaks.interruptionTolerance + 1), 0)
-        XCTAssertEqual(session.record(.personal, seconds: 299), 0)
+        XCTAssertEqual(session.record(.personal, seconds: 83), 0)
         XCTAssertEqual(session.record(.personal, seconds: 1), 1)
     }
 
     func testASecondOwedWorkCycleCanCompleteAnotherBreak() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 1)
         XCTAssertEqual(session.record(.work, seconds: 1500), 0)
+        session.startBreak()
+        XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 1)
     }
 
-    func testBreakBeforeEnoughWorkDoesNotNotify() {
+    func testPassiveBreakBeforeEnoughWorkDoesNotNotify() {
         var session = Session(worked: 1499)
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 600), 0)
@@ -90,6 +102,7 @@ final class BreakCompletionTests: XCTestCase {
 
     func testStartupDoesNotNotifyForAHistoricalCompletedBreak() {
         var session = Session()
+        session.startBreak()
         session.append(.away, seconds: 600)
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 60), 0)
@@ -97,15 +110,17 @@ final class BreakCompletionTests: XCTestCase {
 
     func testGapBetweenSamplesCancelsThePendingCompletion() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 200), 0)
-        session.append(.away, seconds: session.settings.maxSampleGap + 1)
+        session.append(.away, seconds: max(101, session.settings.maxSampleGap + 1))
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
     }
 
     func testDisablingRemindersCancelsThePendingCompletion() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 200), 0)
         session.settings.breakReminders = false
@@ -114,16 +129,18 @@ final class BreakCompletionTests: XCTestCase {
         XCTAssertEqual(session.record(.away, seconds: 100), 0)
     }
 
-    func testResetCancelsThePendingCompletion() {
+    func testResetCreatesAFreshBaselineBeforeAFutureCompletion() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 200), 0)
         session.tracker.reset()
-        XCTAssertEqual(session.record(.away, seconds: 100), 0)
+        XCTAssertEqual(session.record(.away, seconds: 100), 1)
     }
 
     func testCompletionDuringACallIsConsumedWithoutAnAlert() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 290), 0)
         XCTAssertEqual(session.record(.away, seconds: 10, inCall: true), 0)
@@ -131,14 +148,55 @@ final class BreakCompletionTests: XCTestCase {
                        "Ending the call must not deliver the old completion")
     }
 
-    func testDisjointNonworkSegmentsDoNotCombineAcrossMissingTime() {
+    func testMissingClassificationDoesNotMoveTheExplicitDeadline() {
         var session = Session()
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.personal, seconds: 150), 0)
-        // Missing observations are not proof of an uninterrupted break. The
-        // sample gap itself stays below maxSampleGap to isolate this rule.
+        // A short classification gap does not change the user-started deadline.
         session.now = session.now.addingTimeInterval(5)
-        XCTAssertEqual(session.record(.away, seconds: 150), 0)
-        XCTAssertEqual(session.record(.away, seconds: 150), 1)
+        XCTAssertEqual(session.record(.away, seconds: 144), 0)
+        XCTAssertEqual(session.record(.away, seconds: 1), 1)
+    }
+
+    func testPassiveRestAfterAnOwedReminderNeverNotifiesCompletion() {
+        var session = Session()
+        XCTAssertFalse(session.observe())
+        XCTAssertEqual(session.record(.away, seconds: 600), 0)
+        XCTAssertEqual(session.record(.personal, seconds: 600), 0)
+    }
+
+    func testUserCanStartABreakBeforeTheWorkThreshold() {
+        var session = Session(worked: 60)
+        session.startBreak()
+        XCTAssertFalse(session.observe())
+        XCTAssertEqual(session.record(.away, seconds: 300), 1)
+    }
+
+    func testDeadlineIsHonoredWhileContinuingToWork() {
+        var session = Session()
+        session.startBreak()
+        XCTAssertFalse(session.observe())
+        XCTAssertEqual(session.record(.work, seconds: 299), 0)
+        XCTAssertEqual(session.record(.work, seconds: 1), 1)
+    }
+
+    func testReturningFromALongGapBeforeTheDeadlineCanNotifyLater() {
+        var session = Session()
+        session.startBreak()
+        session.settings.maxSampleGap = 30
+        XCTAssertFalse(session.observe())
+        session.append(.away, seconds: 100)
+        XCTAssertFalse(session.observe())
+        XCTAssertEqual(session.record(.away, seconds: 200), 1)
+    }
+
+    func testCancellingTheSessionPreventsCompletion() {
+        var session = Session()
+        session.startBreak()
+        XCTAssertFalse(session.observe())
+        XCTAssertEqual(session.record(.away, seconds: 200), 0)
+        session.activeBreak = nil
+        XCTAssertEqual(session.record(.away, seconds: 100), 0)
     }
 }

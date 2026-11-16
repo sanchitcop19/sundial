@@ -1,5 +1,12 @@
 import Foundation
 
+/// Time entered on the phone is tagged with this instead of a real bundle id,
+/// so it is obvious in the record where it came from, and so the classifier can
+/// tell it is something the user stated rather than something observed.
+public enum MobileSession {
+    public static let bundleId = "sundial.phone.session"
+}
+
 /// The phone-to-Mac channel.
 ///
 /// The mirror is written by the Mac and would overwrite anything the phone put
@@ -66,7 +73,7 @@ public enum Inbox {
                       let span = try? dec.decode(ObservationSpan.self, from: data) {
                 if span.duration >= 1 {
                     store.append(span)
-                    // A session the user started is time they were present for,
+                    // Phone time the user entered is time they were present for,
                     // so it is recorded as input rather than left to the idle rule.
                     let day = Format.day(span.start)
                     var presence = store.load(day: day).presence

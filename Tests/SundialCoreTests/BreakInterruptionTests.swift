@@ -29,11 +29,16 @@ final class BreakInterruptionTests: XCTestCase {
         var settings: Settings
         var segments: [Segment] = []
         var now: Date
+        var activeBreak: Span?
 
         init(settings: Settings, now: Date) {
             self.settings = settings
             self.now = now
             append(.work, seconds: settings.workBeforeBreak)
+        }
+
+        mutating func startBreak() {
+            activeBreak = Span(now, now + settings.breakLength)
         }
 
         mutating func append(_ state: TimeCategory, seconds: TimeInterval) {
@@ -43,7 +48,7 @@ final class BreakInterruptionTests: XCTestCase {
         }
 
         mutating func observe() -> Bool {
-            tracker.update(segments: segments, now: now, settings: settings)
+            tracker.update(activeBreak: activeBreak, now: now, settings: settings)
         }
 
         /// Observe short live steps so completion tests do not exercise the
@@ -72,10 +77,11 @@ final class BreakInterruptionTests: XCTestCase {
 
     func testBriefWorkClassificationStillDeliversOneBreakCompletion() {
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 255), 0)
         XCTAssertEqual(session.record(.work, seconds: 5.6), 0)
-        XCTAssertEqual(session.record(.away, seconds: 344), 0)
+        XCTAssertEqual(session.record(.away, seconds: 338.4), 0)
         XCTAssertEqual(session.record(.away, seconds: 1), 1)
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 600), 0)
@@ -90,6 +96,7 @@ final class BreakInterruptionTests: XCTestCase {
         XCTAssertEqual(status(segments).workedStraight, 0)
 
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 7), 0)
@@ -98,7 +105,7 @@ final class BreakInterruptionTests: XCTestCase {
         XCTAssertEqual(session.record(.unclassified, seconds: 100), 1)
     }
 
-    func testMoreThanFifteenSecondsOfCumulativeWorkInterruptsBreak() {
+    func testMoreThanFifteenSecondsOfWorkInterruptsPassiveRestCreditButNotTheTimer() {
         let segments = run([
             (.work, 3600), (.away, 300), (.work, 7),
             (.personal, 200), (.work, 8.1), (.away, 100)
@@ -108,12 +115,13 @@ final class BreakInterruptionTests: XCTestCase {
         XCTAssertEqual(result.workedStraight, 3615.1, accuracy: 0.001)
 
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 7), 0)
         XCTAssertEqual(session.record(.personal, seconds: 200), 0)
         XCTAssertEqual(session.record(.work, seconds: 8.1), 0)
-        XCTAssertEqual(session.record(.away, seconds: 100), 0)
+        XCTAssertEqual(session.record(.away, seconds: 100), 1)
     }
 
     func testAdjacentWorkSegmentsShareTheInterruptionLimit() {
@@ -124,44 +132,48 @@ final class BreakInterruptionTests: XCTestCase {
         XCTAssertEqual(status(segments).workedStraight, 3620)
 
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 20), 0)
-        XCTAssertEqual(session.record(.away, seconds: 599), 0)
+        XCTAssertEqual(session.record(.away, seconds: 279), 0)
         XCTAssertEqual(session.record(.away, seconds: 1), 1)
     }
 
-    func testToleratedWorkSecondsDoNotCountTowardBreakLength() {
+    func testWorkSecondsDoNotEarnPassiveRestCreditEvenThoughTheTimerContinues() {
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 10), 0)
-        XCTAssertEqual(session.record(.personal, seconds: 299), 0)
+        XCTAssertEqual(session.record(.personal, seconds: 299), 1)
         XCTAssertTrue(status(session.segments).owed)
         XCTAssertEqual(status(session.segments).workedStraight, 3610)
-        XCTAssertEqual(session.record(.personal, seconds: 1), 1)
+        XCTAssertEqual(session.record(.personal, seconds: 1), 0)
         XCTAssertFalse(status(session.segments).owed)
     }
 
     func testMissingTimeDoesNotJoinTwoShortBreaks() {
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         session.now = session.now.addingTimeInterval(5)
-        XCTAssertEqual(session.record(.personal, seconds: 300), 0)
+        XCTAssertEqual(session.record(.personal, seconds: 300), 1)
         XCTAssertTrue(status(session.segments).owed)
         XCTAssertEqual(status(session.segments).workedStraight, 3600)
-        XCTAssertEqual(session.record(.personal, seconds: 300), 1)
+        XCTAssertEqual(session.record(.personal, seconds: 300), 0)
         XCTAssertFalse(status(session.segments).owed)
     }
 
     func testWorkToleranceDoesNotBridgeMissingTime() {
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 5), 0)
         session.now = session.now.addingTimeInterval(5)
-        XCTAssertEqual(session.record(.away, seconds: 300), 0)
+        XCTAssertEqual(session.record(.away, seconds: 300), 1)
         XCTAssertTrue(status(session.segments).owed)
         XCTAssertEqual(status(session.segments).workedStraight, 3605)
     }
@@ -213,6 +225,7 @@ final class BreakInterruptionTests: XCTestCase {
 
     func testSubsequentWorkCycleCanCompleteAnotherInterruptedBreak() {
         var session = Session(settings: settings, now: t0)
+        session.startBreak()
         XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.away, seconds: 255), 0)
         XCTAssertEqual(session.record(.work, seconds: 5.6), 0)
@@ -220,6 +233,8 @@ final class BreakInterruptionTests: XCTestCase {
         XCTAssertEqual(session.record(.work, seconds: 3600), 0)
         XCTAssertTrue(status(session.segments).owed)
         XCTAssertEqual(status(session.segments).workedStraight, 3600)
+        session.startBreak()
+        XCTAssertFalse(session.observe())
         XCTAssertEqual(session.record(.personal, seconds: 300), 0)
         XCTAssertEqual(session.record(.work, seconds: 10), 0)
         XCTAssertEqual(session.record(.away, seconds: 300), 1)

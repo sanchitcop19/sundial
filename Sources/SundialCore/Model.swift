@@ -231,12 +231,24 @@ public struct Segment: Sendable, Equatable, Identifiable {
 }
 
 public enum Format {
+    public static func hoursMinutes(_ t: TimeInterval, roundingUp: Bool = false) -> String {
+        let minutes = Int((max(0, t) / 60).rounded(roundingUp ? .up : .down))
+        return String(format: "%d:%02d", minutes / 60, minutes % 60)
+    }
+
     public static func duration(_ t: TimeInterval) -> String {
         let total = Int(t.rounded())
         if total < 60 { return "\(total)s" }
         let h = total / 3600, m = (total % 3600) / 60
         if h > 0 { return String(format: "%dh %02dm", h, m) }
         return "\(m)m"
+    }
+
+    /// A running stopwatch reading: "0:07", "12:03", "1:02:03".
+    public static func clockDuration(_ t: TimeInterval) -> String {
+        let total = Int(max(0, t))
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     /// "4.25 h" style, for CSV and charts.
