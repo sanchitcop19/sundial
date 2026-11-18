@@ -8,7 +8,7 @@ struct RootView: View {
         Group {
             if library.folder == nil { ConnectView() } else { MainTabs() }
         }
-        .task { library.refresh() }
+        .task { await library.refresh() }
     }
 }
 
