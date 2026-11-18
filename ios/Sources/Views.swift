@@ -31,8 +31,11 @@ struct ConnectView: View {
                 .multilineTextAlignment(.center).padding(.horizontal, 28)
             Text("Usually iCloud Drive › Sundial")
                 .font(.footnote).foregroundStyle(.tertiary)
-            Button("Choose folder…") { picking = true }
-                .buttonStyle(.borderedProminent).controlSize(.large)
+            Button { picking = true } label: {
+                if library.isBusy(Library.refreshKey) { ProgressView() } else { Text("Choose folder…") }
+            }
+            .buttonStyle(.borderedProminent).controlSize(.large)
+            .disabled(library.isBusy(Library.refreshKey))
             if let s = library.status {
                 Text(s).font(.footnote).foregroundStyle(.orange).padding(.horizontal, 28)
             }
@@ -43,7 +46,7 @@ struct ConnectView: View {
                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.bottom, 12)
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result { library.connect(to: url) }
+            if case .success(let url) = result { Task { await library.connect(to: url) } }
         }
     }
 }
@@ -107,9 +110,11 @@ struct TodayView: View {
                 }
             }
             .navigationTitle("Today")
-            .refreshable { library.refresh() }
+            .refreshable { await library.refresh() }
             .toolbar {
-                Button { library.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                BusyButton(isBusy: library.isBusy(Library.refreshKey)) {
+                    await library.refresh()
+                } label: { Image(systemName: "arrow.clockwise") }
             }
         }
     }
@@ -149,13 +154,15 @@ struct MobileReviewView: View {
                                 Text(item.snapshot.summary).font(.callout.weight(.medium))
                                 Text("\(Format.duration(item.seconds)) · seen \(item.occurrences)×")
                                     .font(.caption).foregroundStyle(.secondary)
+                                let rowBusy = library.isBusy(rowKey(item))
                                 HStack {
-                                    Button("Work") { quick(item, .work) }
+                                    BusyButton("Work", isBusy: rowBusy) { await quick(item, .work) }
                                         .buttonStyle(.bordered).tint(TimeCategory.work.color)
-                                    Button("Personal") { quick(item, .personal) }
+                                    BusyButton("Personal", isBusy: rowBusy) { await quick(item, .personal) }
                                         .buttonStyle(.bordered).tint(TimeCategory.personal.color)
                                     Spacer()
                                     Button("Scope…") { choosing = item }.buttonStyle(.bordered)
+                                        .disabled(rowBusy)
                                 }
                                 .font(.caption)
                             }
@@ -165,23 +172,25 @@ struct MobileReviewView: View {
                 }
             }
             .navigationTitle("Review")
-            .refreshable { library.refresh() }
+            .refreshable { await library.refresh() }
             .sheet(item: $choosing) { item in
                 ScopeSheet(snapshot: item.snapshot) { rule in
-                    library.add(rule); choosing = nil
+                    await library.add(rule, key: rowKey(item)); choosing = nil
                 } onCancel: { choosing = nil }
             }
         }
     }
 
-    private func quick(_ item: ReviewItem, _ outcome: Outcome) {
+    private func rowKey(_ item: ReviewItem) -> String { "review:\(item.id)" }
+
+    private func quick(_ item: ReviewItem, _ outcome: Outcome) async {
         let ladder = Suggestions.build(for: item.snapshot)
         let choice = ladder.first { $0.scope == .site }
             ?? ladder.first { $0.scope == .workspace }
             ?? ladder.first { $0.scope == .project }
             ?? ladder.first { $0.scope == .app }
         guard let choice else { return }
-        library.add(choice.rule(outcome: outcome))
+        await library.add(choice.rule(outcome: outcome), key: rowKey(item))
     }
 }
 
@@ -189,7 +198,7 @@ struct MobileReviewView: View {
 /// decision that would have been made there.
 struct ScopeSheet: View {
     let snapshot: Snapshot
-    var onAdd: (Rule) -> Void
+    var onAdd: (Rule) async -> Void
     var onCancel: () -> Void
 
     @State private var outcome: Outcome = .personal
@@ -229,8 +238,8 @@ struct ScopeSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onCancel) }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add rule") {
-                        if let s = selected { onAdd(s.rule(outcome: outcome)) }
+                    BusyButton("Add rule") {
+                        if let s = selected { await onAdd(s.rule(outcome: outcome)) }
                     }.disabled(selected == nil)
                 }
             }
@@ -262,7 +271,10 @@ struct SessionView: View {
                                 .font(.callout).foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity).padding(.vertical, 8)
-                        Button("Stop and send to Mac", role: .destructive) { library.stopSession() }
+                        BusyButton("Stop and send to Mac", role: .destructive,
+                                   isBusy: library.isBusy(Library.stopKey)) {
+                            await library.stopSession()
+                        }
                     }
                 } else {
                     Section("What are you doing?") {

@@ -70,6 +70,7 @@ struct StatsView: View {
                 }
             }
             .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 4)
+            .disabled(loading)
         }
     }
 

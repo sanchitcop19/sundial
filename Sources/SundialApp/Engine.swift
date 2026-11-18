@@ -586,12 +586,21 @@ final class Engine: ObservableObject {
     }
 
     func rebuildAllDays() {
+        Task { await rebuildAllDaysNow() }
+    }
+
+    /// Rebuilds every day's totals and returns once they are written, so the
+    /// button that asked for it can show progress until then.
+    func rebuildAllDaysNow() async {
         writeDaily()
         let r = rules, s = settings
         let root = store.root
-        DispatchQueue.global(qos: .utility).async {
-            // A separate Store instance: nothing is shared across queues.
-            Store(root: root).rebuildDaily(rules: r, settings: s)
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                // A separate Store instance: nothing is shared across queues.
+                Store(root: root).rebuildDaily(rules: r, settings: s)
+                done.resume()
+            }
         }
     }
 
@@ -628,12 +637,20 @@ final class Engine: ObservableObject {
         return total
     }
 
-    @discardableResult
-    func backupNow() -> (destinations: [String], errors: [String]) {
+    /// Copying to cloud folders can stall on a slow sync daemon, so the copy
+    /// runs off the main thread and the button can show progress meanwhile.
+    func backupNow() async -> (destinations: [String], errors: [String]) {
         drainInbox()
         writeDaily()
-        let r = store.mirror(to: settings.backupTo,
-                             includeObservations: settings.backupObservations, day: day)
+        let root = store.root, tokens = settings.backupTo
+        let include = settings.backupObservations, today = day
+        let r = await withCheckedContinuation {
+            (done: CheckedContinuation<(destinations: [String], errors: [String]), Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                done.resume(returning: Store(root: root).mirror(
+                    to: tokens, includeObservations: include, day: today))
+            }
+        }
         backupErrors = r.errors
         if !r.destinations.isEmpty { lastBackup = Date() }
         return r

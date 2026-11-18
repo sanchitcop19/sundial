@@ -122,8 +122,8 @@ struct SettingsView: View {
                             get: { engine.settings.backupObservations },
                             set: { engine.settings.backupObservations = $0 }))
                         HStack {
-                            Button("Back up now") {
-                                let r = engine.backupNow()
+                            BusyButton("Back up now") {
+                                let r = await engine.backupNow()
                                 backupMessage = r.destinations.isEmpty
                                     ? (r.errors.first ?? "Nothing configured")
                                     : "Copied to \(r.destinations.count) place\(r.destinations.count == 1 ? "" : "s")"
@@ -150,8 +150,8 @@ struct SettingsView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                         Text(engine.store.root.path)
                             .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                        Button("Recalculate every day from the raw record") {
-                            engine.rebuildAllDays()
+                        BusyButton("Recalculate every day from the raw record") {
+                            await engine.rebuildAllDaysNow()
                         }.controlSize(.small)
                     }
                 }

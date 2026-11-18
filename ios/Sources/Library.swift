@@ -51,7 +51,7 @@ final class Library: ObservableObject {
         folder = url
     }
 
-    func connect(to url: URL) {
+    func connect(to url: URL) async {
         guard url.startAccessingSecurityScopedResource() else {
             status = "Could not open that folder."
             return
@@ -61,7 +61,7 @@ final class Library: ObservableObject {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
         folder = url
-        refresh()
+        await refresh()
     }
 
     func disconnect() {
@@ -71,13 +71,68 @@ final class Library: ObservableObject {
         segments = []; totals = Totals(); reviewItems = []; daily = []
     }
 
+    // MARK: - Busy state
+
+    /// Jobs started from a button and not yet finished. Buttons show a
+    /// spinner while their job is here, and a second press is ignored.
+    @Published private(set) var busy = BusyTracker()
+
+    func isBusy(_ key: String) -> Bool { busy.isBusy(key) }
+
+    static let refreshKey = "refresh"
+
+    /// Runs `work` under `key`, unless a job with that key is already running.
+    private func run(_ key: String, _ work: () async -> Void) async {
+        guard busy.begin(key) else { return }
+        await work()
+        busy.end(key)
+    }
+
     // MARK: - Reading
 
-    func refresh() {
+    /// Everything one read of the folder produces. Built off the main thread:
+    /// cloud files can take a while to come down, and the screen has to keep
+    /// drawing its spinner meanwhile.
+    private struct Loaded {
+        var rules: RuleSet
+        var daily: [DailySummary] = []
+        var day: String
+        var hasDetail = false
+        var status: String?
+        var segments: [Segment] = []
+        var totals = Totals()
+        var reviewItems: [ReviewItem] = []
+        var pendingCount: Int?
+    }
+
+    func refresh() async {
+        await run(Self.refreshKey) { await reload() }
+    }
+
+    private func reload() async {
         guard let folder else { return }
+        let current = rules
+        let loaded = await Task.detached(priority: .userInitiated) {
+            Library.load(from: folder, rules: current)
+        }.value
+        // Disconnected or pointed elsewhere while reading: drop the result.
+        guard self.folder == folder else { return }
+        rules = loaded.rules
+        daily = loaded.daily
+        day = loaded.day
+        hasDetail = loaded.hasDetail
+        status = loaded.status
+        segments = loaded.segments
+        totals = loaded.totals
+        reviewItems = loaded.reviewItems
+        if let n = loaded.pendingCount { pendingCount = n }
+    }
+
+    private nonisolated static func load(from folder: URL, rules current: RuleSet) -> Loaded {
         let scoped = folder.startAccessingSecurityScopedResource()
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
 
+        var out = Loaded(rules: current, day: Format.day(Date()))
         let fm = FileManager.default
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .custom { decoder in
@@ -94,34 +149,29 @@ final class Library: ObservableObject {
 
         if let d = try? Data(contentsOf: folder.appendingPathComponent("rules.json")),
            let r = try? dec.decode(RuleSet.self, from: d) {
-            rules = r
+            out.rules = r
         }
         if let text = try? String(contentsOf: folder.appendingPathComponent("daily.csv"),
                                   encoding: .utf8) {
-            daily = text.split(separator: "\n").compactMap { DailySummary.parse(row: String($0)) }
+            out.daily = text.split(separator: "\n").compactMap { DailySummary.parse(row: String($0)) }
                 .sorted { $0.date < $1.date }
         }
 
         // The detailed record is optional on the Mac side, so its absence is a
         // state to explain rather than an error.
-        day = Format.day(Date())
         let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
-        let obsName = names.first { $0 == "observations-\(day).jsonl" }
+        let obsName = names.first { $0 == "observations-\(out.day).jsonl" }
             ?? names.filter { $0.hasPrefix("observations-") }.sorted().last
         guard let obsName else {
-            hasDetail = false
-            segments = []; reviewItems = []
-            totals = Totals()
-            status = daily.isEmpty
+            out.status = out.daily.isEmpty
                 ? "No record found in that folder."
                 : "Daily totals only. Turn on “Include the raw record” in the Mac app to review here."
-            return
+            return out
         }
-        hasDetail = true
-        status = nil
+        out.hasDetail = true
         if let dayFromName = obsName.split(separator: "-").dropFirst().joined(separator: "-")
             .replacingOccurrences(of: ".jsonl", with: "") as String?, dayFromName.count == 10 {
-            day = dayFromName
+            out.day = dayFromName
         }
 
         var observations: [ObservationSpan] = []
@@ -132,30 +182,41 @@ final class Library: ObservableObject {
             }
         }
         var presence = PresenceLog()
-        if let d = try? Data(contentsOf: folder.appendingPathComponent("presence-\(day).json")),
+        if let d = try? Data(contentsOf: folder.appendingPathComponent("presence-\(out.day).json")),
            let p = try? dec.decode(PresenceLog.self, from: d) {
             presence = p
         }
         // Anything already sent from the phone counts too.
-        let (extraObs, extraInput) = pendingSessions()
+        let (extraObs, extraInput) = pendingSessions(in: folder, day: out.day)
         observations.append(contentsOf: extraObs)
         presence.input.append(contentsOf: extraInput)
         presence.normalise()
 
-        segments = Classifier(rules: rules, settings: .default)
+        out.segments = Classifier(rules: out.rules, settings: .default)
             .classify(observations: observations, presence: presence)
-        totals = Totals.compute(segments)
-        reviewItems = ReviewItem.build(from: segments)
-        pendingCount = (try? fm.contentsOfDirectory(atPath: inbox().path).count) ?? 0
+        out.totals = Totals.compute(out.segments)
+        out.reviewItems = ReviewItem.build(from: out.segments)
+        out.pendingCount = (try? fm.contentsOfDirectory(atPath: inbox(in: folder).path).count) ?? 0
+        return out
     }
 
     // MARK: - Writing back
 
-    private func inbox() -> URL {
-        let dir = (folder ?? URL(fileURLWithPath: NSTemporaryDirectory()))
-            .appendingPathComponent("inbox")
+    private nonisolated static func inbox(in folder: URL) -> URL {
+        let dir = folder.appendingPathComponent("inbox")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// Writes one file into the inbox off the main thread.
+    private func send(_ data: Data?, named name: String, to folder: URL) async {
+        guard let data else { return }
+        await Task.detached(priority: .userInitiated) {
+            let scoped = folder.startAccessingSecurityScopedResource()
+            defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+            try? data.write(to: Library.inbox(in: folder).appendingPathComponent(name),
+                            options: .atomic)
+        }.value
     }
 
     private var encoder: JSONEncoder {
@@ -172,16 +233,18 @@ final class Library: ObservableObject {
 
     /// Rules added on the phone are applied locally at once so the screen
     /// responds, and left in the inbox for the Mac to adopt.
-    func add(_ rule: Rule) {
+    ///
+    /// `key` names the button's job, so for example both choices on one review
+    /// row stay disabled while either is being sent.
+    func add(_ rule: Rule, key: String? = nil) async {
+        await run(key ?? "rule:\(rule.id.uuidString)") { await write(rule) }
+    }
+
+    private func write(_ rule: Rule) async {
         guard let folder else { return }
-        let scoped = folder.startAccessingSecurityScopedResource()
-        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
         rules.insertBySpecificity(rule)
-        if let d = try? encoder.encode(rule) {
-            try? d.write(to: inbox().appendingPathComponent("rule-\(rule.id.uuidString).json"),
-                         options: .atomic)
-        }
-        refresh()
+        await send(try? encoder.encode(rule), named: "rule-\(rule.id.uuidString).json", to: folder)
+        await reload()
     }
 
     func startSession(label: String, outcome: Outcome) {
@@ -189,30 +252,36 @@ final class Library: ObservableObject {
         persistSession()
     }
 
-    func stopSession() {
-        guard let s = activeSession, let folder else { return }
-        activeSession = nil
-        persistSession()
-        guard Date().timeIntervalSince(s.start) >= 5 else { return }
+    static let stopKey = "session.stop"
 
-        let scoped = folder.startAccessingSecurityScopedResource()
-        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+    func stopSession() async {
+        await run(Self.stopKey) { await finishSession() }
+    }
+
+    private func finishSession() async {
+        guard let s = activeSession, let folder else { return }
+        let end = Date()
+        guard end.timeIntervalSince(s.start) >= 5 else {
+            activeSession = nil
+            persistSession()
+            return
+        }
         let span = ObservationSpan(
-            start: s.start, end: Date(),
+            start: s.start, end: end,
             snapshot: Snapshot(bundleId: MobileSession.bundleId, appName: "Phone",
                                windowTitle: s.label, workspace: s.label))
-        if let d = try? encoder.encode(span) {
-            try? d.write(to: inbox().appendingPathComponent("session-\(UUID().uuidString).json"),
-                         options: .atomic)
-        }
+        await send(try? encoder.encode(span), named: "session-\(UUID().uuidString).json", to: folder)
+        // Cleared only once sent, so the timer stays up beside the spinner.
+        activeSession = nil
+        persistSession()
         // Make sure the label has a rule, so phone time is not left unclassified.
         if rules.match(span.snapshot) == nil {
-            add(Rule(name: "Phone: \(s.label)",
-                     conditions: [Condition(.bundleId, .equals, MobileSession.bundleId),
-                                  Condition(.workspace, .equals, s.label)],
-                     outcome: s.outcome, origin: .manual))
+            await write(Rule(name: "Phone: \(s.label)",
+                             conditions: [Condition(.bundleId, .equals, MobileSession.bundleId),
+                                          Condition(.workspace, .equals, s.label)],
+                             outcome: s.outcome, origin: .manual))
         } else {
-            refresh()
+            await reload()
         }
     }
 
@@ -225,8 +294,8 @@ final class Library: ObservableObject {
     }
 
     /// Sessions still waiting for the Mac to pick them up.
-    private func pendingSessions() -> ([ObservationSpan], [Span]) {
-        guard let folder else { return ([], []) }
+    private nonisolated static func pendingSessions(in folder: URL,
+                                                    day: String) -> ([ObservationSpan], [Span]) {
         let dir = folder.appendingPathComponent("inbox")
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else {
             return ([], [])
