@@ -13,6 +13,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      - path: Resources
     dependencies:
       - package: Sundial
         product: SundialCore
@@ -23,13 +24,23 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGNING_ALLOWED: NO
+        # Xcode Cloud signs with cloud-managed certificates for this team.
+        DEVELOPMENT_TEAM: 6FBCL8RW44
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: Sundial
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # No encryption beyond what iOS provides, so TestFlight builds skip
+        # the export-compliance question and reach testers unattended.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+    # A shared scheme: Xcode Cloud can only build schemes committed with the project.
+    scheme: {}
